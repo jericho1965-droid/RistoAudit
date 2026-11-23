@@ -14,6 +14,7 @@ import os
 import re
 import time
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Any
 
@@ -649,7 +650,7 @@ def fetch_google_maps_brightdata_reviews(
 
     rows: list[dict[str, Any]] = []
     try:
-        with httpx.Client(verify=certifi.where(), timeout=65.0) as client:
+        with httpx.Client(verify=certifi.where(), timeout=35.0) as client:
             resp = client.post(endpoint, headers=headers, json=payload)
             if resp.status_code == 200:
                 rows = _parse_brightdata_payload(resp.text)
@@ -657,8 +658,8 @@ def fetch_google_maps_brightdata_reviews(
                 snap = resp.json().get("snapshot_id")
                 if snap:
                     snap_url = f"https://api.brightdata.com/datasets/v3/snapshot/{snap}?format=json"
-                    for _ in range(9):
-                        time.sleep(5)
+                    for _ in range(5):
+                        time.sleep(4)
                         r_snap = client.get(snap_url, headers=headers)
                         if r_snap.status_code == 200:
                             rows = _parse_brightdata_payload(r_snap.text)
@@ -779,7 +780,7 @@ def fetch_facebook_brightdata_reviews(
 
     rows: list[dict[str, Any]] = []
     try:
-        with httpx.Client(verify=certifi.where(), timeout=65.0) as client:
+        with httpx.Client(verify=certifi.where(), timeout=35.0) as client:
             resp = client.post(endpoint, headers=headers, json=payload)
             if resp.status_code == 200:
                 rows = _parse_brightdata_payload(resp.text)
@@ -787,8 +788,8 @@ def fetch_facebook_brightdata_reviews(
                 snap = resp.json().get("snapshot_id")
                 if snap:
                     snap_url = f"https://api.brightdata.com/datasets/v3/snapshot/{snap}?format=json"
-                    for _ in range(9):
-                        time.sleep(5)
+                    for _ in range(5):
+                        time.sleep(4)
                         r_snap = client.get(snap_url, headers=headers)
                         if r_snap.status_code == 200:
                             rows = _parse_brightdata_payload(r_snap.text)
@@ -1064,11 +1065,46 @@ def run_reputation_and_social_audit(
         or next((u for u in web_review_urls if "google.com/maps" in u.lower()), "")
     )
 
-    # Arricchimento Google Maps Reviews via Bright Data (fino a 25 recensioni + risposte proprietario!)
-    bd_g_data = fetch_google_maps_brightdata_reviews(
-        google_maps_url=google_maps_url,
-        api_key=audit_input.brightdata_api_key,
-    ) if (google_maps_url and audit_input.brightdata_api_key.strip()) else {}
+    # Esegue IN PARALLELO Bright Data (Google Maps + Facebook) e TripAdvisor Terra per restare sotto i 30-40s!
+    fb_url = channels.get("facebook", {}).get("url", "")
+    bd_g_data: dict[str, Any] = {}
+    ta_data: dict[str, Any] = {}
+    fb_rev_data: dict[str, Any] = {}
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        fut_bd_g = (
+            pool.submit(fetch_google_maps_brightdata_reviews, google_maps_url, audit_input.brightdata_api_key)
+            if (google_maps_url and audit_input.brightdata_api_key.strip()) else None
+        )
+        fut_ta = pool.submit(
+            fetch_tripadvisor_terra_data,
+            audit_input.restaurant_name,
+            audit_input.city,
+            tripadvisor_url,
+            audit_input.tripadvisor_terra_api_key,
+        )
+        fut_fb = (
+            pool.submit(fetch_facebook_brightdata_reviews, fb_url, audit_input.brightdata_api_key)
+            if (fb_url and audit_input.brightdata_api_key.strip()) else None
+        )
+
+        if fut_bd_g:
+            try:
+                bd_g_data = fut_bd_g.result(timeout=55)
+            except Exception as exc:
+                print(f"[RistoAudit] Timeout/errore Bright Data Google: {exc}")
+        try:
+            ta_data = fut_ta.result(timeout=20)
+        except Exception as exc:
+            print(f"[RistoAudit] Timeout/errore TripAdvisor Terra: {exc}")
+        if fut_fb:
+            try:
+                fb_rev_data = fut_fb.result(timeout=55)
+            except Exception as exc:
+                print(f"[RistoAudit] Timeout/errore Bright Data Facebook: {exc}")
+
+    if fb_url and not fb_rev_data:
+        fb_rev_data = fetch_facebook_public_reviews(fb_url)
 
     if bd_g_data:
         if google_rating is None and bd_g_data.get("rating") is not None:
@@ -1086,26 +1122,11 @@ def run_reputation_and_social_audit(
     effective_neg = bd_g_data.get("negative_reviews_count") if bd_g_data else gp_data.get("negative_reviews_count", 0)
     effective_low = bd_g_data.get("low_rating_reviews_count") if bd_g_data else gp_data.get("low_rating_reviews_count", 0)
 
-    # Arricchimento automatico TripAdvisor Terra API (se API key configurata)
-    ta_data = fetch_tripadvisor_terra_data(
-        name=audit_input.restaurant_name,
-        city=audit_input.city,
-        tripadvisor_url=tripadvisor_url,
-        api_key=audit_input.tripadvisor_terra_api_key,
-    )
     if ta_data:
         if not tripadvisor_url and ta_data.get("web_url"):
             tripadvisor_url = ta_data["web_url"]
         if tripadvisor_rating is None and ta_data.get("rating") is not None:
             tripadvisor_rating = ta_data["rating"]
-
-    # Verifica recensioni Facebook: prima Bright Data (se chiave configurata), altrimenti metadati pubblici
-    fb_url = channels.get("facebook", {}).get("url", "")
-    fb_rev_data: dict[str, Any] = {}
-    if fb_url:
-        fb_rev_data = fetch_facebook_brightdata_reviews(fb_url, api_key=audit_input.brightdata_api_key)
-        if not fb_rev_data:
-            fb_rev_data = fetch_facebook_public_reviews(fb_url)
 
     merged_complaints = list(dict.fromkeys(
         (gp_data.get("complaint_themes") or [])

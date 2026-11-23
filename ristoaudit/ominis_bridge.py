@@ -344,6 +344,12 @@ def run_ominis_recon(
         result["errors"].append("Modulo Ominis-OSINT non trovato in vendor/Ominis-OSINT.")
         return result
 
+    # Sui datacenter cloud (es. Render) DuckDuckGo/Bing bloccano gli IP con ConnectTimeout:
+    # evita di bloccare la richiesta HTTP oltre il timeout del proxy.
+    if os.environ.get("RENDER", "").lower() == "true":
+        run_search = False
+        run_username = False
+
     result["ominis_available"] = True
     core = _core_name(restaurant_name)
 
