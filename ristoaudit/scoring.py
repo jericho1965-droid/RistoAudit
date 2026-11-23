@@ -82,6 +82,14 @@ def run_full_audit(audit_input: AuditInput) -> AuditResult:
         osint_data=osint_data,
         gp_data=gp_data,
     )
+    print(
+        f"[RistoAudit] SUMMARY '{audit_input.restaurant_name}': "
+        f"GP={reviews_data.get('google_places_api_used')}({len(gp_data.get('reviews') or [])}r) | "
+        f"BD_G={reviews_data.get('google_brightdata_used')}({len(reviews_data.get('google_reviews') or [])}r) | "
+        f"TA={reviews_data.get('tripadvisor_terra_used')}({len(reviews_data.get('tripadvisor_reviews') or [])}r) | "
+        f"BD_FB={reviews_data.get('facebook_brightdata_used')}({len(reviews_data.get('facebook_reviews') or [])}r) | "
+        f"Site={website_data.get('final_url') or 'NONE'} | Menu={menu_data.get('found')}"
+    )
 
     # =========================================================================
     # 1. SITO WEB & ESPERIENZA MOBILE (peso 25%)
@@ -844,7 +852,8 @@ def run_full_audit(audit_input: AuditInput) -> AuditResult:
     records_count = len(osint_data.get("search_records", []))
     username_found = sum(s.get("found_count", 0) for s in osint_data.get("username_scans", []))
 
-    if audit_input.run_ominis_search and records_count < 4:
+    web_search_ran = bool(osint_data.get("queries_executed")) and not osint_data.get("errors")
+    if audit_input.run_ominis_search and web_search_ran and records_count < 4:
         osint_score -= 30
         findings.append(Finding(
             category="osint",

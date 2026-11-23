@@ -482,6 +482,7 @@ def fetch_tripadvisor_terra_data(
                     "https://terra.tripadvisor.com/api/recommendations/search?version=1",
                     headers=headers,
                     json={
+                        "geo": {},
                         "query": f"{name} {city}",
                         "top_level_categories": ["Eat & Drink"],
                         "limit": 5,
@@ -502,12 +503,14 @@ def fetch_tripadvisor_terra_data(
                         if not isinstance(cand, dict):
                             continue
                         loc_obj = cand.get("location") if isinstance(cand.get("location"), dict) else cand
-                        cand_name = str(loc_obj.get("name") or loc_obj.get("title") or "").lower()
+                        cand_name = _extract_localized_text(loc_obj.get("name") or loc_obj.get("title")).lower()
                         if name_tokens and all(tok in cand_name for tok in name_tokens[:2]):
                             cid = loc_obj.get("id") or loc_obj.get("location_id")
                             if cid:
                                 loc_id = str(cid)
                                 break
+                    if not loc_id:
+                        print(f"[RistoAudit] TripAdvisor Terra search 200 ma nessun match per '{name}': keys={list(s_data.keys()) if isinstance(s_data, dict) else type(s_data)}")
                 else:
                     print(f"[RistoAudit] TripAdvisor Terra search HTTP {r_search.status_code}: {r_search.text[:250]}")
 
