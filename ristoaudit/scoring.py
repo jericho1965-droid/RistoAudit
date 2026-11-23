@@ -705,6 +705,8 @@ def run_full_audit(audit_input: AuditInput) -> AuditResult:
         fb_pct = reviews_data.get("facebook_recommendation_pct")
         fb_yes = reviews_data.get("facebook_recommended_count", 0)
         fb_no = reviews_data.get("facebook_not_recommended_count", 0)
+        fb_revs = reviews_data.get("facebook_reviews") or []
+        fb_unans = sum(1 for r in fb_revs if not r.get("has_owner_reply"))
         if fb_pct is not None and fb_pct >= 85 and fb_yes >= 3:
             strengths.append(Finding(
                 category="reviews",
@@ -723,6 +725,19 @@ def run_full_audit(audit_input: AuditInput) -> AuditResult:
                 description=f"Nell'analisi delle ultime recensioni Facebook emergono {fb_no} valutazioni negative ('Non consiglia').",
                 business_impact="Su Facebook le recensioni negative restano ben visibili agli amici e ai contatti locali, frenando il passaparola in città.",
                 recommendation="Rispondere in modo cordiale e costruttivo a ogni recensione negativa su Facebook e stimolare i clienti soddisfatti a lasciare un riscontro.",
+            ))
+        if fb_revs and fb_unans >= 2:
+            rev_score -= 6
+            findings.append(Finding(
+                category="reviews",
+                severity="MEDIO",
+                title=f"Recensioni Facebook senza risposta dalla pagina ({fb_unans} su {len(fb_revs)} recenti)",
+                description=f"Tra le ultime {len(fb_revs)} recensioni pubblicate su Facebook, {fb_unans} non mostrano una risposta o interazione da parte del ristorante.",
+                business_impact=(
+                    "Su Facebook ogni risposta della pagina genera una notifica al cliente e aumenta la visibilità organica del ristorante "
+                    "nel feed degli amici di chi ha recensito: non rispondere significa perdere passaparola locale gratuito."
+                ),
+                recommendation="Rispondere regolarmente anche alle recensioni su Facebook (ringraziando per nome chi consiglia il locale e gestendo con empatia eventuali segnalazioni).",
             ))
 
     if reviews_data.get("tripadvisor_terra_used"):
@@ -844,6 +859,30 @@ def run_full_audit(audit_input: AuditInput) -> AuditResult:
             ))
 
     rev_score = _clamp(rev_score)
+
+    # Assicura che la tabella "Presenza sui Motori di Ricerca e Portali Web" elenchi sempre gli asset reali verificati
+    # anche quando lo scraping motori e' disattivato/bloccato su cloud (es. Render).
+    existing_rec_urls = {r.get("url", "").rstrip("/") for r in osint_data.get("search_records", [])}
+    verified_assets = [
+        (f"Sito Web Ufficiale — {audit_input.restaurant_name}", website_data.get("final_url") if website_data.get("reachable") else ""),
+        (f"Menù Digitale — {audit_input.restaurant_name}", menu_data.get("url") if menu_data.get("found") else ""),
+        (f"Google Maps — {audit_input.restaurant_name}", reviews_data.get("google_maps_url")),
+        (f"TripAdvisor — {audit_input.restaurant_name}", reviews_data.get("tripadvisor_url")),
+        (f"TheFork — {audit_input.restaurant_name}", reviews_data.get("thefork_url")),
+        (f"Instagram — {audit_input.restaurant_name}", social_data["channels"]["instagram"].get("url")),
+        (f"Facebook — {audit_input.restaurant_name}", social_data["channels"]["facebook"].get("url")),
+        (f"TikTok — {audit_input.restaurant_name}", social_data["channels"]["tiktok"].get("url")),
+    ]
+    for label, asset_url in verified_assets:
+        u = str(asset_url or "").strip()
+        if u and u.rstrip("/") not in existing_rec_urls:
+            existing_rec_urls.add(u.rstrip("/"))
+            osint_data.setdefault("search_records", []).append({
+                "title": label,
+                "url": u,
+                "engine": "verificato",
+                "snippet": "",
+            })
 
     # =========================================================================
     # 5. VISIBILITÀ WEB & LOCAL SEO (peso 15%)

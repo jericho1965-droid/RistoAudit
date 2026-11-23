@@ -713,7 +713,8 @@ def fetch_google_maps_brightdata_reviews(
         ).strip()
         rel_time = str(row.get("review_date") or row.get("date") or row.get("published_at") or "")[:16]
         owner_reply = (
-            row.get("owner_response")
+            row.get("response_of_owner")
+            or row.get("owner_response")
             or row.get("response_from_owner_text")
             or row.get("owner_answer")
             or row.get("reply")
@@ -854,6 +855,10 @@ def fetch_facebook_brightdata_reviews(
         sentiment = "positiva" if recommends is True else ("negativa" if recommends is False else "neutra")
         # Mappa a rating fittizio 5/1 solo per riusare i detector tematici IT/EN
         pseudo_rating = 5 if recommends is True else (1 if recommends is False else 3)
+        fb_reply = row.get("response_of_owner") or row.get("owner_response") or row.get("reply")
+        num_comments = row.get("num_comments") if row.get("num_comments") is not None else row.get("comments_count")
+        has_fb_reply = bool(str(fb_reply).strip()) if fb_reply else (bool(num_comments) if num_comments is not None else False)
+
         reviews.append({
             "author": author,
             "recommends": recommends,
@@ -861,6 +866,7 @@ def fetch_facebook_brightdata_reviews(
             "rating": pseudo_rating,
             "text": " ".join(text.split()),
             "date": rev_time,
+            "has_owner_reply": has_fb_reply,
         })
 
     if not reviews:
