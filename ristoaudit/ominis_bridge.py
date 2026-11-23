@@ -257,7 +257,7 @@ async def _run_search_query(query: str, max_results: int = 12, scan_pages: bool 
         max_results=max_results,
         scan_pages=scan_pages,
         scan_limit=min(4, max_results),
-        timeout=12.0,
+        timeout=6.0,
     )
     report = await ominis_search.run(settings)
     return {
@@ -439,9 +439,9 @@ def run_ominis_recon(
         )
 
     try:
-        asyncio.run(asyncio.wait_for(_orchestrate(), timeout=45.0))
+        asyncio.run(asyncio.wait_for(_orchestrate(), timeout=16.0))
     except asyncio.TimeoutError:
-        result["errors"].append("Timeout parziale durante la ricerca web (45s).")
+        result["errors"].append("Timeout parziale durante la ricerca web (16s).")
     except Exception as exc:
         result["errors"].append(f"Errore ricerca web: {exc}")
 
