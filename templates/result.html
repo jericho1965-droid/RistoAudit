@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Report Audit — {{ result.input_data.restaurant_name }}</title>
+  <style>
+    :root {
+      --navy: #1e293b;
+      --dark: #0f172a;
+      --accent: #c2410c;
+      --muted: #64748b;
+      --border: #e2e8f0;
+      --soft: #f8fafc;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #f1f5f9;
+      color: var(--dark);
+      line-height: 1.5;
+    }
+    .hero {
+      background: linear-gradient(135deg, #0f172a, #1e293b);
+      color: #fff;
+      padding: 28px 20px;
+      border-bottom: 4px solid var(--accent);
+    }
+    .container { max-width: 1000px; margin: 0 auto; padding: 0 16px; }
+    .hero-flex {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 20px;
+    }
+    .hero-left {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      flex-wrap: wrap;
+    }
+    .hero-logo {
+      background: #ffffff;
+      border-radius: 12px;
+      padding: 6px 10px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.22);
+      flex-shrink: 0;
+    }
+    .hero-logo img {
+      height: 92px;
+      width: auto;
+      display: block;
+    }
+    .hero h1 { margin: 4px 0; font-size: 1.8rem; }
+    .hero p { margin: 0; color: #cbd5e1; font-size: 0.94rem; }
+    .score-pill {
+      background: {% if result.overall_score >= 80 %}#16a34a{% elif result.overall_score >= 60 %}#d97706{% elif result.overall_score >= 40 %}#ea580c{% else %}#dc2626{% endif %};
+      color: #fff;
+      padding: 14px 24px;
+      border-radius: 12px;
+      text-align: center;
+      min-width: 140px;
+    }
+    .score-pill .num { font-size: 2rem; font-weight: 800; line-height: 1.1; }
+    .score-pill .lbl { font-size: 0.82rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
+
+    .actions-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin: 22px 0;
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      text-decoration: none;
+      padding: 12px 22px;
+      border-radius: 9px;
+      font-weight: 700;
+      font-size: 0.95rem;
+    }
+    .btn-pdf { background: var(--accent); color: #fff; }
+    .btn-pdf:hover { background: #9a3412; }
+    .btn-back { background: #fff; color: var(--dark); border: 1px solid #cbd5e1; }
+    .btn-back:hover { background: #f8fafc; }
+
+    .card {
+      background: #fff;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px 24px;
+      margin-bottom: 18px;
+    }
+    .card h2 { margin: 0 0 14px; font-size: 1.12rem; color: var(--navy); border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+    .exec-summary {
+      background: var(--soft);
+      border-left: 4px solid var(--accent);
+      padding: 14px 16px;
+      border-radius: 6px;
+      font-size: 0.95rem;
+    }
+    .cat-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      gap: 12px;
+    }
+    .cat-box {
+      background: var(--soft);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px;
+    }
+    .cat-box .c-title { font-size: 0.84rem; font-weight: 700; color: var(--navy); }
+    .cat-box .c-score { font-size: 1.4rem; font-weight: 800; margin: 4px 0; }
+    .bar-track { height: 7px; background: #e2e8f0; border-radius: 99px; overflow: hidden; }
+    .bar-fill { height: 100%; border-radius: 99px; }
+
+    .finding {
+      border: 1px solid var(--border);
+      border-left-width: 4px;
+      border-radius: 8px;
+      padding: 13px 16px;
+      margin-bottom: 10px;
+    }
+    .sev-CRITICO { border-left-color: #dc2626; background: #fef2f2; }
+    .sev-ALTO { border-left-color: #ea580c; background: #fff7ed; }
+    .sev-MEDIO { border-left-color: #d97706; background: #fffbeb; }
+    .sev-BASSO { border-left-color: #2563eb; background: #eff6ff; }
+    .sev-OTTIMO { border-left-color: #16a34a; background: #f0fdf4; }
+    .finding .f-head { font-weight: 700; margin-bottom: 4px; }
+    .finding p { margin: 4px 0; font-size: 0.9rem; }
+    .tag {
+      display: inline-block;
+      font-size: 0.72rem;
+      font-weight: 800;
+      padding: 2px 7px;
+      border-radius: 4px;
+      margin-right: 6px;
+      background: #0f172a;
+      color: #fff;
+    }
+    table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+    th { background: var(--soft); color: var(--navy); }
+    .warn-box {
+      background: #fffbeb;
+      border: 1px solid #fde68a;
+      padding: 12px 16px;
+      border-radius: 8px;
+      font-size: 0.85rem;
+      color: #92400e;
+    }
+  </style>
+</head>
+<body>
+  <header class="hero">
+    <div class="container hero-flex">
+      <div class="hero-left">
+        <div class="hero-logo">
+          <img src="/assets/ristoaudit-logo.png" alt="RistoAudit Logo">
+        </div>
+        <div>
+          <div style="font-size:0.78rem; color:#fdba74; font-weight:700; letter-spacing:0.05em;">AUDIT COMPLETATO • {{ result.created_at }}</div>
+          <h1>{{ result.input_data.restaurant_name }}</h1>
+          <p>{{ result.input_data.city }}{% if result.input_data.cuisine_type %} • {{ result.input_data.cuisine_type }}{% endif %}</p>
+        </div>
+      </div>
+      <div class="score-pill">
+        <div class="num">{{ result.overall_score }}/100</div>
+        <div class="lbl">{{ result.overall_grade }}</div>
+      </div>
+    </div>
+  </header>
+
+  <main class="container" style="padding-bottom: 50px;">
+    <div class="actions-bar">
+      <a class="btn btn-back" href="/">← Nuovo Audit</a>
+      <a class="btn btn-pdf" href="/download/{{ pdf_filename }}">📥 Scarica Report PDF Completo</a>
+    </div>
+
+    <section class="card" style="background:#fff7ed; border-color:#fdba74;">
+      <h2 style="border-bottom-color:#fed7aa; color:#9a3412;">Chi siamo — Benvenuti in RistoAudit</h2>
+      <p style="margin:0 0 8px; font-size:0.94rem;">
+        <strong>RistoAudit</strong> è il servizio specializzato nell'analisi e nell'ottimizzazione della presenza online dei ristoranti: valutiamo sito web, menù digitale, canali social, recensioni e visibilità sui motori di ricerca per aiutare i locali ad attrarre nuovi clienti e aumentare le prenotazioni.
+      </p>
+      <p style="margin:0; font-size:0.94rem;">
+        <strong>Questo report viene offerto gratuitamente al vostro ristorante</strong> per offrirvi una fotografia chiara dei punti di forza e delle aree di miglioramento. Noi di <strong>RistoAudit</strong> vi offriamo i nostri servizi dedicati per agire direttamente sulle criticità rilevate: <strong>sentitevi liberi di contattarci per ogni informazione</strong>{% if result.input_data.consultant_contact %} ({{ result.input_data.consultant_contact }}){% endif %}.
+      </p>
+    </section>
+
+    <section class="card">
+      <h2>Sintesi Esecutiva</h2>
+      <div class="exec-summary">{{ result.executive_summary }}</div>
+    </section>
+
+    <section class="card">
+      <h2>Punteggio per Area</h2>
+      <div class="cat-grid">
+        {% for c in result.category_scores %}
+        <div class="cat-box">
+          <div class="c-title">{{ c.label }}</div>
+          <div class="c-score" style="color: {% if c.score >= 80 %}#16a34a{% elif c.score >= 60 %}#d97706{% elif c.score >= 40 %}#ea580c{% else %}#dc2626{% endif %};">{{ c.score }}/100</div>
+          <div class="bar-track">
+            <div class="bar-fill" style="width: {{ c.score }}%; background: {% if c.score >= 80 %}#16a34a{% elif c.score >= 60 %}#d97706{% elif c.score >= 40 %}#ea580c{% else %}#dc2626{% endif %};"></div>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    </section>
+
+    {% if result.strengths %}
+    <section class="card">
+      <h2 style="color:#15803d;">Punti di Forza Rilevati ({{ result.strengths | length }})</h2>
+      {% for st in result.strengths %}
+      <div class="finding sev-OTTIMO">
+        <div class="f-head"><span class="tag" style="background:#16a34a;">PUNTO DI FORZA</span> {{ st.title }}</div>
+        <p>{{ st.description }}</p>
+        <p><strong>Valore per il locale:</strong> {{ st.business_impact }}</p>
+      </div>
+      {% endfor %}
+    </section>
+    {% endif %}
+
+    <section class="card">
+      <h2>Criticità e Opportunità Rilevate ({{ result.findings | length }})</h2>
+      {% for f in result.findings %}
+      <div class="finding sev-{{ f.severity }}">
+        <div class="f-head"><span class="tag">{{ f.severity }}</span> {{ f.title }}</div>
+        <p><strong>Situazione rilevata:</strong> {{ f.description }}</p>
+        {% if f.evidence %}<p style="color:#64748b; font-size:0.82rem;"><em>Dettaglio tecnico: {{ f.evidence }}</em></p>{% endif %}
+        <p><strong style="color:#991b1b;">Perché è un problema per il tuo ristorante:</strong> {{ f.business_impact }}</p>
+        <p><strong style="color:#1e3a8a;">Come intervenire subito:</strong> {{ f.recommendation }}</p>
+      </div>
+      {% endfor %}
+    </section>
+
+    {% if result.reviews_data.google_reviews %}
+    <section class="card">
+      <h2>Analisi Automatica Recensioni Google ({{ result.reviews_data.google_reviews | length }} rilevate)</h2>
+      <p style="margin:0 0 12px; font-size:0.92rem;">
+        <strong>Media Google:</strong> {{ result.reviews_data.google_rating or 'N/D' }}/5 ({{ result.reviews_data.google_reviews_count or 'N/D' }} totali) &nbsp;•&nbsp;
+        <span style="color:#16a34a; font-weight:700;">{{ result.reviews_data.positive_reviews_count }} Positive</span> &nbsp;•&nbsp;
+        <span style="color:#d97706; font-weight:700;">{{ result.reviews_data.neutral_reviews_count }} Neutre</span> &nbsp;•&nbsp;
+        <span style="color:#dc2626; font-weight:700;">{{ result.reviews_data.negative_reviews_count }} Negative</span>
+      </p>
+      {% if result.reviews_data.complaint_themes %}
+      <p style="margin:0 0 12px; font-size:0.88rem; color:#9a3412;">
+        <strong>Temi critici emersi dai testi:</strong> {{ result.reviews_data.complaint_themes | join(', ') }}
+      </p>
+      {% endif %}
+      <table>
+        <thead>
+          <tr><th>Autore</th><th>Voto</th><th>Esito</th><th>Risposta</th><th>Data</th><th>Testo Recensione</th></tr>
+        </thead>
+        <tbody>
+          {% for gr in result.reviews_data.google_reviews[:10] %}
+          <tr>
+            <td><strong>{{ gr.author }}</strong></td>
+            <td style="font-weight:700; color:{% if gr.sentiment == 'negativa' %}#dc2626{% elif gr.sentiment == 'neutra' %}#d97706{% else %}#16a34a{% endif %};">{{ gr.rating or 'N/D' }}/5</td>
+            <td style="font-weight:700; text-transform:uppercase; font-size:0.76rem; color:{% if gr.sentiment == 'negativa' %}#dc2626{% elif gr.sentiment == 'neutra' %}#d97706{% else %}#16a34a{% endif %};">{{ gr.sentiment }}</td>
+            <td style="font-weight:700; font-size:0.8rem; color:{% if gr.has_owner_reply == true %}#16a34a{% elif gr.has_owner_reply == false %}#dc2626{% else %}#64748b{% endif %};">{% if gr.has_owner_reply == true %}Sì{% elif gr.has_owner_reply == false %}Senza risposta{% else %}—{% endif %}</td>
+            <td style="color:#64748b; white-space:nowrap;">{{ gr.relative_time or '—' }}</td>
+            <td>{{ gr.text[:260] }}{% if gr.text | length > 260 %}...{% endif %}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </section>
+    {% endif %}
+
+    {% if result.reviews_data.tripadvisor_reviews %}
+    <section class="card">
+      <h2>Analisi Automatica Recensioni TripAdvisor ({{ result.reviews_data.tripadvisor_reviews | length }} rilevate{% if result.reviews_data.tripadvisor_ranking %} • {{ result.reviews_data.tripadvisor_ranking }}{% endif %})</h2>
+      <table>
+        <thead>
+          <tr><th>Autore</th><th>Voto</th><th>Risposta Direzione</th><th>Data</th><th>Testo Recensione</th></tr>
+        </thead>
+        <tbody>
+          {% for tr in result.reviews_data.tripadvisor_reviews %}
+          <tr>
+            <td><strong>{{ tr.author }}</strong></td>
+            <td style="font-weight:700; color:{% if tr.sentiment == 'negativa' %}#dc2626{% elif tr.sentiment == 'neutra' %}#d97706{% else %}#16a34a{% endif %};">{{ tr.rating or 'N/D' }}/5</td>
+            <td style="font-weight:700; color:{% if tr.has_owner_reply %}#16a34a{% else %}#dc2626{% endif %};">{% if tr.has_owner_reply %}Sì{% else %}Senza risposta{% endif %}</td>
+            <td style="color:#64748b; white-space:nowrap;">{{ tr.published_date or '—' }}</td>
+            <td>{{ tr.text[:260] }}{% if tr.text | length > 260 %}...{% endif %}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </section>
+    {% endif %}
+
+    {% if result.reviews_data.facebook_reviews or result.reviews_data.facebook_reviews_summary or result.reviews_data.facebook_reviews_url %}
+    <section class="card">
+      <h2>Recensioni Facebook{% if result.reviews_data.facebook_reviews %} ({{ result.reviews_data.facebook_reviews | length }} rilevate){% endif %}</h2>
+      {% if result.reviews_data.facebook_reviews_summary %}
+      <p style="margin:0 0 10px; font-size:0.94rem;"><strong>Riepilogo:</strong> {{ result.reviews_data.facebook_reviews_summary }}</p>
+      {% endif %}
+      {% if result.reviews_data.facebook_reviews %}
+      <table>
+        <thead>
+          <tr><th>Autore</th><th>Esito</th><th>Data</th><th>Testo Recensione</th></tr>
+        </thead>
+        <tbody>
+          {% for fr in result.reviews_data.facebook_reviews %}
+          <tr>
+            <td><strong>{{ fr.author }}</strong></td>
+            <td style="font-weight:700; color:{% if fr.recommends == true %}#16a34a{% elif fr.recommends == false %}#dc2626{% else %}#64748b{% endif %};">{% if fr.recommends == true %}Consiglia{% elif fr.recommends == false %}Non consiglia{% else %}Recensione{% endif %}</td>
+            <td style="color:#64748b; white-space:nowrap;">{{ fr.date or '—' }}</td>
+            <td>{{ fr.text[:260] }}{% if fr.text | length > 260 %}...{% endif %}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% elif not result.reviews_data.facebook_reviews_summary %}
+      <p style="margin:0 0 8px; font-size:0.9rem; color:#64748b;">Nessuna recensione pubblica rilevata su Facebook.</p>
+      {% endif %}
+      {% if result.reviews_data.facebook_reviews_url %}
+      <p style="margin:10px 0 0; font-size:0.88rem;"><a href="{{ result.reviews_data.facebook_reviews_url }}" target="_blank" rel="noopener">Apri la sezione Recensioni Facebook →</a></p>
+      {% endif %}
+    </section>
+    {% endif %}
+
+    <section class="card">
+      <h2>Presenza sui Motori di Ricerca e Portali Web ({{ result.osint_data.search_records | length }} risultati)</h2>
+      {% if result.osint_data.search_records %}
+      <table>
+        <thead>
+          <tr><th>Titolo / Pagina</th><th>URL</th></tr>
+        </thead>
+        <tbody>
+          {% for r in result.osint_data.search_records[:12] %}
+          <tr>
+            <td>{{ r.title[:65] }}</td>
+            <td><a href="{{ r.url }}" target="_blank" rel="noopener">{{ r.url[:75] }}</a></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <p style="color:#64748b; font-size:0.9rem;">Nessuna traccia web aggiuntiva rilevata in questa verifica.</p>
+      {% endif %}
+    </section>
+  </main>
+</body>
+</html>
+

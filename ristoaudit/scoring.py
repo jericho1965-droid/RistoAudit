@@ -1,0 +1,951 @@
+"""Orchestratore dell'audit, motore di scoring (0-100), punti di forza e criticita' ad alto impatto."""
+
+from __future__ import annotations
+
+import uuid
+from dataclasses import asdict
+
+from .models import AuditInput, AuditResult, CategoryScore, Finding
+from .ominis_bridge import run_ominis_recon
+from .reputation_audit import fetch_google_places_data, run_reputation_and_social_audit
+from .website_audit import run_website_and_menu_audit
+
+
+def _clamp(val: float) -> int:
+    return max(0, min(100, int(round(val))))
+
+
+def _grade_for_score(score: int) -> str:
+    if score >= 85:
+        return "Eccellente"
+    if score >= 70:
+        return "Buono"
+    if score >= 50:
+        return "Migliorabile"
+    return "Critico"
+
+
+def run_full_audit(audit_input: AuditInput) -> AuditResult:
+    """Esegue tutte le fasi dell'analisi approfondita e costruisce il report strutturato."""
+    audit_id = uuid.uuid4().hex[:10]
+    findings: list[Finding] = []
+    strengths: list[Finding] = []
+    warnings: list[str] = []
+
+    # 0. Google Places API (New): recupera scheda, rating, recensioni e sito web ufficiale se presente
+    gp_data = fetch_google_places_data(
+        name=audit_input.restaurant_name,
+        city=audit_input.city,
+        address=audit_input.address,
+        google_maps_url=audit_input.google_maps_url,
+        google_place_id=audit_input.google_place_id,
+        api_key=audit_input.google_places_api_key,
+    )
+    if gp_data:
+        if not audit_input.website_url.strip() and gp_data.get("website_uri"):
+            audit_input.website_url = gp_data["website_uri"]
+        if not audit_input.address.strip() and gp_data.get("formatted_address"):
+            audit_input.address = gp_data["formatted_address"]
+        if not audit_input.google_maps_url.strip() and gp_data.get("maps_uri"):
+            audit_input.google_maps_url = gp_data["maps_uri"]
+
+    # 1. Ricerca Web Approfondita PRIMA del sito web: scopre sito ufficiale, menu indicizzati, social e portali!
+    osint_data = run_ominis_recon(
+        restaurant_name=audit_input.restaurant_name,
+        city=audit_input.city,
+        social_handle=audit_input.social_handle,
+        run_search=audit_input.run_ominis_search,
+        run_username=audit_input.run_ominis_username,
+    )
+    if osint_data.get("errors"):
+        warnings.extend(osint_data["errors"][:5])
+
+    # Se il sito web non era fornito ne' presente su Google, usa quello scoperto dalla ricerca web!
+    if not audit_input.website_url.strip() and osint_data.get("discovered_website_url"):
+        audit_input.website_url = osint_data["discovered_website_url"]
+
+    osint_menu_candidates = [h.get("url", "") for h in osint_data.get("menu_osint_hits", []) if h.get("url")]
+
+    # 2. Analisi Tecnica Sito Web & Menù Digitale (con fallback sui menu trovati sul web)
+    website_data, menu_data = run_website_and_menu_audit(
+        website_url=audit_input.website_url,
+        menu_url=audit_input.menu_url,
+        known_menu_year=audit_input.known_menu_year,
+        deep_link_check=audit_input.deep_link_check,
+        osint_menu_candidates=osint_menu_candidates,
+    )
+
+    # 3. Social + Recensioni & Reputazione
+    social_data, reviews_data = run_reputation_and_social_audit(
+        audit_input=audit_input,
+        website_data=website_data,
+        osint_data=osint_data,
+        gp_data=gp_data,
+    )
+
+    # =========================================================================
+    # 1. SITO WEB & ESPERIENZA MOBILE (peso 25%)
+    # =========================================================================
+    web_score = 100
+    if not website_data["provided"]:
+        web_score = 15
+        findings.append(Finding(
+            category="website",
+            severity="CRITICO",
+            title="Assenza di un sito web ufficiale rilevabile online",
+            description=(
+                f"Dalle verifiche effettuate su Google e sul web non risulta alcun sito web ufficiale collegato a "
+                f"{audit_input.restaurant_name} ({audit_input.city})."
+            ),
+            business_impact=(
+                "Ogni giorno decine di clienti e turisti cercano il ristorante su Google prima di decidere dove cenare: "
+                "senza un sito web autorevole e ben indicizzato, fino al 40-50% di questi utenti abbandona la scelta "
+                "e prenota in un altro locale della zona che mostra subito ambiente, piatti e bottone di prenotazione."
+            ),
+            recommendation=(
+                "Realizzare un sito web veloce, mobile-first e orientato alle prenotazioni dirette, completo di galleria "
+                "fotografica, menù digitale interattivo, mappa, orari e collegamento diretto con Google Business Profile."
+            ),
+        ))
+    elif not website_data["reachable"]:
+        web_score = 10
+        findings.append(Finding(
+            category="website",
+            severity="CRITICO",
+            title="Sito web irraggiungibile o bloccato da errore server",
+            description=(
+                f"Il sito web {website_data['url']} ha restituito un errore tecnico "
+                f"({website_data.get('error') or 'HTTP ' + str(website_data.get('status_code'))}) impedendo l'accesso ai visitatori."
+            ),
+            business_impact=(
+                "Per un cliente che clicca dal proprio smartphone, un sito offline equivale a trovare la saracinesca abbassata: "
+                "comunica immediatamente chiusura definitiva o grave trascuratezza e dirotta le prenotazioni alla concorrenza."
+            ),
+            recommendation="Ripristinare immediatamente hosting, certificato SSL e configurazione DNS, attivando un monitoraggio continuo.",
+            evidence=website_data.get("error") or f"HTTP {website_data.get('status_code')}",
+        ))
+    else:
+        # Punti di forza Sito Web
+        if website_data["uses_https"] and website_data.get("ssl", {}).get("valid", True):
+            strengths.append(Finding(
+                category="website",
+                severity="OTTIMO",
+                title="Sito web attivo e protetto con protocollo sicuro HTTPS",
+                description=(
+                    f"Il sito ufficiale ({website_data['final_url']}) è regolarmente raggiungibile e protetto da certificato SSL valido"
+                    + (f" (scadenza {website_data['ssl']['expires_at']})." if website_data.get("ssl", {}).get("expires_at") else ".")
+                ),
+                business_impact="Garantisce sicurezza ai visitatori su Chrome/Safari ed evita penalizzazioni di base su Google.",
+                recommendation="Mantenere attivo il rinnovo automatico del certificato SSL.",
+            ))
+        if website_data["has_viewport"] and website_data["load_time_ms"] <= 2000:
+            strengths.append(Finding(
+                category="website",
+                severity="OTTIMO",
+                title=f"Buona velocità di risposta ({website_data['load_time_ms']} ms) e supporto mobile",
+                description="Il sito risponde rapidamente e include la configurazione viewport per l'adattamento agli schermi smartphone.",
+                business_impact="Riduce l'abbandono immediato dei clienti che consultano il ristorante da telefono prima di uscire a cena.",
+                recommendation="Continuare a ottimizzare le immagini dei piatti per preservare la rapidità di caricamento.",
+            ))
+
+        # Criticità Sito Web
+        if not website_data["uses_https"] or not website_data.get("ssl", {}).get("valid", True):
+            web_score -= 22
+            findings.append(Finding(
+                category="website",
+                severity="CRITICO",
+                title="Sito segnalato come 'Non Sicuro' (Certificato SSL/HTTPS mancante o scaduto)",
+                description=(
+                    f"Il dominio {website_data['final_url']} non utilizza una connessione HTTPS valida. "
+                    "I browser moderni mostrano una schermata di allarme rosso o la dicitura 'Non sicuro' nella barra degli indirizzi."
+                ),
+                business_impact=(
+                    "Oltre il 70% degli utenti chiude immediatamente una pagina segnalata come non sicura. "
+                    "Inoltre Google penalizza drasticamente i siti senza HTTPS nei risultati di ricerca locali a " + audit_input.city + "."
+                ),
+                recommendation="Installare subito un certificato SSL valido e impostare il reindirizzamento permanente da HTTP a HTTPS.",
+            ))
+        if not website_data["has_viewport"]:
+            web_score -= 18
+            findings.append(Finding(
+                category="website",
+                severity="ALTO",
+                title="Sito non ottimizzato per smartphone (esperienza mobile compromessa)",
+                description="Nella pagina principale manca il meta tag viewport necessario per adattare testi, foto e pulsanti agli schermi dei telefoni.",
+                business_impact=(
+                    "Nella ristorazione oltre l'80% delle ricerche avviene da smartphone, spesso mentre il cliente è già in giro. "
+                    "Dover fare zoom continuo per leggere orari o telefono fa perdere prenotazioni in meno di 10 secondi."
+                ),
+                recommendation="Aggiornare il layout con un design responsive mobile-first e pulsanti grandi cliccabili con il pollice.",
+            ))
+        if website_data["load_time_ms"] > 2500:
+            web_score -= 10
+            findings.append(Finding(
+                category="website",
+                severity="MEDIO",
+                title=f"Tempi di caricamento troppo lenti ({website_data['load_time_ms']} ms)",
+                description=f"La homepage ha impiegato {website_data['load_time_ms']} millisecondi solo per la risposta iniziale (soglia consigliata < 1.500 ms).",
+                business_impact=(
+                    "Secondo gli studi Google, oltre la metà degli utenti mobile abbandona un sito se impiega più di 3 secondi ad aprirsi: "
+                    "significa perdere clienti interessati prima ancora che vedano le foto del locale."
+                ),
+                recommendation="Ottimizzare peso delle immagini (formato WebP), attivare sistemi di caching e verificare le prestazioni del server.",
+            ))
+        if not website_data["has_booking_cta"]:
+            web_score -= 12
+            findings.append(Finding(
+                category="website",
+                severity="ALTO",
+                title="Nessun sistema di prenotazione online o pulsante 'Prenota' immediato",
+                description="In homepage non è stato rilevato un sistema di prenotazione tavolo digitale (form dedicato, WhatsApp Business o gestionale sala).",
+                business_impact=(
+                    "Sempre più clienti (soprattutto giovani, famiglie e turisti stranieri) prenotano fuori orario di servizio o evitano di telefonare. "
+                    "Non offrire una prenotazione in 2 clic significa regalare coperti ogni settimana ai ristoranti vicini."
+                ),
+                recommendation="Inserire un pulsante ben visibile 'Prenota un tavolo' in alto nel sito, collegato a WhatsApp Business o a un sistema senza commissioni.",
+            ))
+        if not website_data["has_phone"]:
+            web_score -= 10
+            findings.append(Finding(
+                category="website",
+                severity="ALTO",
+                title="Numero di telefono non trovato o non cliccabile da smartphone",
+                description="Non è stato rilevato un numero di telefono formattato come link diretto (tel:) nella pagina principale.",
+                business_impact="Chi vuole chiamare al volo per un tavolo last-minute si innervosisce se deve copiare e incollare il numero manualmente.",
+                recommendation="Posizionare il numero di telefono cliccabile nell'intestazione del sito e nel footer.",
+            ))
+        if not website_data["meta_description"] or not website_data["title"]:
+            web_score -= 8
+            findings.append(Finding(
+                category="website",
+                severity="MEDIO",
+                title="Tag SEO fondamentali incompleti (Title o Meta Description mancanti)",
+                description="Mancano il titolo SEO o la descrizione breve che Google mostra nei risultati di ricerca.",
+                business_impact=(
+                    f"Quando un utente cerca 'ristorante a {audit_input.city}', un risultato senza descrizione curata "
+                    "ottiene molti meno clic rispetto ai concorrenti che presentano subito specialità e punti di forza."
+                ),
+                recommendation=f"Scrivere Title e Meta Description persuasivi includendo nome del locale, cucina tipica, zona e invito a prenotare a {audit_input.city}.",
+            ))
+        if not website_data["has_restaurant_schema"]:
+            web_score -= 8
+            findings.append(Finding(
+                category="website",
+                severity="MEDIO",
+                title="Dati strutturati Google per Ristoranti (Schema.org) assenti",
+                description="Il codice del sito non contiene il markup JSON-LD 'Restaurant / LocalBusiness' usato da Google per capire tipo di cucina, orari, fascia di prezzo e menù.",
+                business_impact=(
+                    "Senza dati strutturati il ristorante perde posizionamento nelle ricerche locali di Google e nelle risposte degli assistenti vocali/AI."
+                ),
+                recommendation="Integrare il codice JSON-LD Schema.org/Restaurant completo di indirizzo, telefono, orari, cucina e link al menù.",
+            ))
+        if website_data["copyright_outdated"]:
+            web_score -= 6
+            findings.append(Finding(
+                category="website",
+                severity="MEDIO",
+                title=f"Sito visibilmente datato (Copyright fermo al {website_data['copyright_year']})",
+                description=f"Nel piè di pagina compare ancora l'anno {website_data['copyright_year']} come ultimo riferimento di aggiornamento.",
+                business_impact=(
+                    "Un sito fermo a diversi anni fa genera subito il dubbio che prezzi, orari o addirittura la gestione del locale non siano più attuali."
+                ),
+                recommendation="Rinfrescare l'anno di copyright, le foto stagionali e i contenuti principali del sito.",
+            ))
+        if website_data["broken_links"]:
+            web_score -= min(15, 5 * len(website_data["broken_links"]))
+            sample_bad = ", ".join(f"{b['url']} (HTTP {b['status']})" for b in website_data["broken_links"][:3])
+            findings.append(Finding(
+                category="website",
+                severity="ALTO",
+                title=f"Rilevati {len(website_data['broken_links'])} collegamenti rotti (pagine 404/errore) sul sito",
+                description="Alcuni link presenti nelle pagine del sito o verso i social puntano a indirizzi inesistenti o in errore.",
+                business_impact=(
+                    "Un link rotto interrompe bruscamente la navigazione del cliente proprio mentre sta cercando informazioni per prenotare, "
+                    "danneggiando sia la credibilità del locale sia il posizionamento su Google."
+                ),
+                recommendation="Riparare o sostituire immediatamente tutti i collegamenti interrotti rilevati.",
+                evidence=sample_bad,
+            ))
+        if not website_data["has_privacy_cookie"]:
+            web_score -= 5
+            findings.append(Finding(
+                category="website",
+                severity="BASSO",
+                title="Informativa Privacy, Cookie Policy o Partita IVA non chiaramente visibili",
+                description="Nel footer della homepage non risultano chiaramente rilevabili i riferimenti legali obbligatori.",
+                business_impact="Espone l'attività a possibili contestazioni e sanzioni amministrative per mancata conformità GDPR e normativa italiana.",
+                recommendation="Inserire nel footer Partita IVA, ragione sociale, Privacy Policy e Cookie Policy aggiornate.",
+            ))
+
+    web_score = _clamp(web_score)
+
+    # =========================================================================
+    # 2. MENÙ DIGITALE & AGGIORNAMENTO (peso 20%)
+    # =========================================================================
+    menu_score = 100
+    if not menu_data["found"]:
+        menu_score = 20
+        findings.append(Finding(
+            category="menu",
+            severity="CRITICO",
+            title="Menù digitale non trovato o non consultabile online",
+            description="Non è stato possibile individuare un menù consultabile direttamente dal sito web o dai principali risultati di ricerca.",
+            business_impact=(
+                "Il menù è in assoluto la pagina più visitata del sito di un ristorante (oltre il 75% dei visitatori lo apre prima di prenotare). "
+                "Non trovarlo blocca la decisione di chi ha preferenze alimentari, budget definito o sta scegliendo per un gruppo."
+            ),
+            recommendation="Pubblicare un menù digitale mobile-friendly direttamente sul sito e collegarlo nella scheda Google Business Profile.",
+        ))
+    else:
+        # Punti di forza Menù & Verifica Anzianità esplicita
+        menu_date_label = menu_data.get("pdf_modified") or menu_data.get("last_modified") or (
+            str(menu_data["estimated_year"]) if menu_data.get("estimated_year") else ""
+        )
+        if not menu_data["is_outdated"]:
+            if menu_data.get("age_months") is not None:
+                strengths.append(Finding(
+                    category="menu",
+                    severity="OTTIMO",
+                    title=f"Menù digitale raggiungibile e aggiornato di recente ({menu_date_label})",
+                    description=(
+                        f"Il menù online ({menu_data['url']}, formato {str(menu_data['format']).upper()}) risulta aggiornato "
+                        f"circa {menu_data['age_months']} mesi fa ({menu_date_label})"
+                        + (", con prezzi visibili" if menu_data.get("has_prices") else "")
+                        + (" e allergeni indicati." if menu_data.get("has_allergens") else ".")
+                    ),
+                    business_impact="Un menù aggiornato elimina il rischio di sorprese su prezzi o piatti al tavolo e aumenta la fiducia di chi prenota.",
+                    recommendation="Mantenere questa buona pratica aggiornando il menù a ogni cambio stagione.",
+                ))
+            else:
+                strengths.append(Finding(
+                    category="menu",
+                    severity="OTTIMO",
+                    title=f"Menù digitale raggiungibile online ({str(menu_data['format']).upper()})",
+                    description=(
+                        f"Il menù è stato individuato e risulta accessibile online ({menu_data['url']})"
+                        + (" con prezzi espressi chiaramente" if menu_data.get("has_prices") else "")
+                        + (" e indicazione allergeni." if menu_data.get("has_allergens") else ".")
+                    ),
+                    business_impact="Permette ai clienti di scoprire l'offerta gastronomica prima di prenotare, aumentando la conversione.",
+                    recommendation="Assicurarsi che ogni cambio stagionale di piatti o prezzi venga aggiornato contestualmente anche online.",
+                ))
+                menu_score -= 6
+                findings.append(Finding(
+                    category="menu",
+                    severity="MEDIO",
+                    title="Data di aggiornamento del menù online non rilevabile (anzianità non verificabile)",
+                    description=(
+                        "La pagina del menù non espone una data di ultimo aggiornamento (né nei metadati del sito né nel testo visibile)."
+                    ),
+                    business_impact=(
+                        "Quando il cliente non vede la stagione o l'anno del menù online, teme che prezzi o piatti siano vecchi e non aggiornati alla sala, "
+                        "riducendo la fiducia prima della prenotazione."
+                    ),
+                    recommendation="Indicare chiaramente in cima o in fondo al menù la dicitura 'Menù aggiornato a [Mese/Stagione Anno]' e aggiornare la pagina a ogni variazione di listino.",
+                ))
+
+        if menu_data["is_outdated"]:
+            menu_score -= 35
+            age_desc = (
+                f"circa {menu_data['age_months']} mesi fa"
+                if menu_data.get("age_months") is not None
+                else f"anno stimato {menu_data.get('estimated_year')}"
+            )
+            findings.append(Finding(
+                category="menu",
+                severity="CRITICO",
+                title="Menù digitale obsoleto / non aggiornato da troppo tempo",
+                description=f"I metadati del documento o i riferimenti nel testo indicano che il menù online risale a {age_desc}.",
+                business_impact=(
+                    "Un menù vecchio è una delle prime cause di recensioni negative da 1-2 stelle: quando il cliente arriva al tavolo "
+                    "e trova piatti non più disponibili o prezzi più alti rispetto a quelli visti online, si sente ingannato."
+                ),
+                recommendation="Aggiornare immediatamente il menù online con listino e piatti attuali, eliminando i vecchi file PDF ancora indicizzati.",
+                evidence=f"Data PDF: {menu_data.get('pdf_modified') or 'N/D'} | Aggiornamento server: {menu_data.get('last_modified') or 'N/D'}",
+            ))
+        if menu_data["format"] == "pdf":
+            menu_score -= 10
+            if menu_data["is_scanned_image_pdf"]:
+                menu_score -= 20
+                findings.append(Finding(
+                    category="menu",
+                    severity="ALTO",
+                    title="Menù in PDF scansionato (solo immagine: scomodo da telefono e invisibile a Google)",
+                    description="Il file PDF del menù non contiene testo leggibile ma solo pagine fotografate o scansionate.",
+                    business_impact=(
+                        "Su smartphone costringe il cliente a pizzicare e ingrandire continuamente lo schermo, rendendo frustrante la lettura. "
+                        "Inoltre Google non riesce a leggere i nomi dei vostri piatti tipici, facendovi perdere ricerche locali."
+                    ),
+                    recommendation="Trasformare il menù in una pagina web HTML mobile-first con categorie chiare, prezzi leggibili e foto dei piatti di punta.",
+                ))
+            else:
+                findings.append(Finding(
+                    category="menu",
+                    severity="BASSO",
+                    title="Menù pubblicato solo come file PDF da scaricare",
+                    description="Il menù è consultabile esclusivamente tramite download/apertura di un file PDF anziché come pagina web nativa.",
+                    business_impact="Da smartphone un PDF è meno fluido di una pagina web dedicata e si indicizza peggio su Google per i singoli piatti.",
+                    recommendation="Affiancare al PDF una pagina menù HTML ottimizzata per smartphone e facile da aggiornare in 2 minuti.",
+                ))
+        elif menu_data["format"] == "image_only":
+            menu_score -= 25
+            findings.append(Finding(
+                category="menu",
+                severity="ALTO",
+                title="Menù composto solo da immagini (non leggibile dai motori di ricerca)",
+                description="La pagina del menù contiene pochissimo testo reale e si basa quasi solo su immagini caricate.",
+                business_impact="Lento da caricare con connessione mobile, difficile da leggere e invisibile alle ricerche Google per singoli piatti.",
+                recommendation="Pubblicare il menù in formato testuale HTML strutturato con sezioni chiare.",
+            ))
+        if not menu_data["has_prices"]:
+            menu_score -= 12
+            findings.append(Finding(
+                category="menu",
+                severity="MEDIO",
+                title="Prezzi non visibili nel menù online",
+                description="Nel testo del menù online non risultano indicati chiaramente i prezzi delle portate.",
+                business_impact=(
+                    "La mancanza di prezzi genera diffidenza: molti potenziali clienti presumono che il locale sia troppo caro "
+                    "e scelgono un ristorante concorrente più trasparente."
+                ),
+                recommendation="Esporre con chiarezza i prezzi aggiornati di tutte le portate, bevande principali e coperto.",
+            ))
+        if not menu_data["has_allergens"]:
+            menu_score -= 10
+            findings.append(Finding(
+                category="menu",
+                severity="MEDIO",
+                title="Indicazione allergeni e opzioni alimentari non rilevata nel menù",
+                description="Nel menù digitale non risultano riferimenti chiari agli allergeni (Reg. UE 1169/2011) o a opzioni senza glutine/vegetariane.",
+                business_impact=(
+                    "Basta una sola persona celiaca, intollerante o vegetariana in una tavolata da 6-8 persone per far spostare l'intera prenotazione "
+                    "verso un locale che comunica chiaramente allergeni e alternative."
+                ),
+                recommendation="Aggiungere la legenda allergeni completa ed evidenziare opzioni senza glutine, senza lattosio e vegetariane.",
+            ))
+
+    menu_score = _clamp(menu_score)
+
+    # =========================================================================
+    # 3. PRESENZA SOCIAL & ATTIVITÀ (peso 20%)
+    # =========================================================================
+    social_score = 100
+    channels = social_data["channels"]
+    present_socials = [c.capitalize() for c in ("instagram", "facebook", "tiktok", "youtube") if channels[c]["present"]]
+
+    # Punti di forza Social (dettagliati!)
+    if channels["instagram"]["present"] and channels["facebook"]["present"]:
+        strengths.append(Finding(
+            category="social",
+            severity="OTTIMO",
+            title=f"Presidio attivo sui principali canali social ({', '.join(present_socials)})",
+            description=(
+                f"Il ristorante è presente con profili ufficiali su {', '.join(present_socials)} "
+                f"(Instagram: {channels['instagram']['url']} | Facebook: {channels['facebook']['url']})."
+            ),
+            business_impact=(
+                "Avere sia Instagram (vetrina visiva per piatti, reel e pubblico 18-45) sia Facebook (pubblico locale 35+, eventi e famiglie) "
+                "costituisce una base solida per generare passaparola digitale e fidelizzare i clienti."
+            ),
+            recommendation="Potenziare la costanza editoriale con brevi Reel dietro le quinte, piatti stagionali e link diretto alla prenotazione in bio.",
+        ))
+    elif present_socials:
+        strengths.append(Finding(
+            category="social",
+            severity="OTTIMO",
+            title=f"Presenza social avviata su {', '.join(present_socials)}",
+            description=f"È stato rilevato un presidio ufficiale attivo su {', '.join(present_socials)}.",
+            business_impact="Offre già un canale diretto per mostrare piatti e atmosfera del locale ai potenziali clienti.",
+            recommendation="Completare l'ecosistema collegando i profili al sito web e mantenendo una pubblicazione regolare.",
+        ))
+
+    if social_data["social_inactivity_level"] == "attiva":
+        strengths.append(Finding(
+            category="social",
+            severity="OTTIMO",
+            title="Canali social aggiornati di recente",
+            description=f"L'ultimo contenuto pubblicato risale al {social_data['last_post_date']} ({social_data['days_since_last_post']} giorni fa).",
+            business_impact="Dimostra ai potenziali clienti che il locale è vivo, curato e attivo ogni settimana.",
+            recommendation="Mantenere questa frequenza costante alternando foto piatti, sala, staff e recensioni dei clienti.",
+        ))
+
+    # Criticità Social
+    if not channels["instagram"]["present"]:
+        social_score -= 30
+        findings.append(Finding(
+            category="social",
+            severity="CRITICO",
+            title="Profilo Instagram ufficiale non rilevato",
+            description="Non è stato individuato un profilo Instagram ufficiale associato al ristorante.",
+            business_impact=(
+                "Oggi Instagram è il vero 'menù visivo' della ristorazione: migliaia di persone scelgono dove andare a cena guardando foto e brevi video dei piatti. "
+                "Non esserci rende il locale invisibile a tutta la fascia 20-45 anni e ai turisti."
+            ),
+            recommendation="Creare un profilo Instagram Business curato con bio chiara, link prenotazione/menù, storie in evidenza e 2-3 contenuti a settimana.",
+        ))
+    if not channels["facebook"]["present"]:
+        social_score -= 20
+        findings.append(Finding(
+            category="social",
+            severity="MEDIO",
+            title="Pagina Facebook ufficiale non rilevata",
+            description="Non risulta una pagina Facebook ufficiale attiva per il ristorante.",
+            business_impact="Si perde visibilità sul pubblico locale over 35, ideale per pranzi domenicali, cene di gruppo, ricorrenze e menù festivi.",
+            recommendation="Attivare la Pagina Facebook e collegarla a Instagram tramite Meta Business Suite per pubblicare in un clic su entrambi.",
+        ))
+    if not channels["tiktok"]["present"]:
+        social_score -= 10
+        findings.append(Finding(
+            category="social",
+            severity="BASSO",
+            title="Assenza su TikTok (canale ad altissima visibilità organica gratuita)",
+            description="Non risulta un profilo TikTok attivo per il locale.",
+            business_impact=(
+                f"I video brevi di 15-30 secondi (preparazione piatti, impasto pizza, impiattamento) geolocalizzati su {audit_input.city} "
+                "raggiungono gratuitamente migliaia di utenti locali senza dover investire in pubblicità."
+            ),
+            recommendation=f"Ripubblicare gli stessi brevi Reel di Instagram anche su TikTok con hashtag e geolocalizzazione su {audit_input.city}.",
+        ))
+
+    if social_data["social_inactivity_level"] == "critica":
+        social_score -= 30
+        findings.append(Finding(
+            category="social",
+            severity="CRITICO",
+            title=f"Profili social abbandonati da {social_data['days_since_last_post']} giorni",
+            description=f"L'ultimo post rilevato risale al {social_data['last_post_date']} (oltre 3 mesi di silenzio).",
+            business_impact=(
+                "Un profilo social fermo da mesi è peggio di non averlo: il potenziale cliente pensa che il locale abbia chiuso, "
+                "abbia cambiato gestione o non curi la propria immagine."
+            ),
+            recommendation="Riattivare subito il profilo con un calendario minimo ma costante (almeno 2 post/reel e 4 stories a settimana).",
+        ))
+    elif social_data["social_inactivity_level"] == "alta":
+        social_score -= 15
+        findings.append(Finding(
+            category="social",
+            severity="ALTO",
+            title=f"Pubblicazione social discontinua ({social_data['days_since_last_post']} giorni dall'ultimo post)",
+            description=f"L'ultimo contenuto pubblicato risale al {social_data['last_post_date']}.",
+            business_impact="Gli algoritmi di Instagram e Facebook penalizzano i profili incostanti, azzerando la visibilità anche verso chi già segue il ristorante.",
+            recommendation="Pianificare una routine settimanale fissa (es. martedì piatto signature, venerdì invito al weekend).",
+        ))
+
+    if website_data["reachable"] and not any(channels[c]["linked_on_website"] for c in ("instagram", "facebook")):
+        social_score -= 10
+        findings.append(Finding(
+            category="social",
+            severity="MEDIO",
+            title="Profili social non collegati sul sito web",
+            description="Nel sito web non sono stati rilevati link cliccabili verso le pagine Instagram o Facebook del locale.",
+            business_impact="Si spezza il percorso del cliente: chi visita il sito non riesce a vedere foto recenti e atmosfera del locale sui social.",
+            recommendation="Inserire le icone cliccabili dei profili social nell'intestazione, nel footer e nella pagina contatti del sito.",
+        ))
+
+    social_score = _clamp(social_score)
+
+    # =========================================================================
+    # 4. RECENSIONI & REPUTAZIONE ONLINE (peso 20%)
+    # =========================================================================
+    rev_score = 100
+    unanswered = reviews_data.get("unanswered_reviews_count")
+    unanswered_neg = reviews_data.get("unanswered_negative_reviews")
+    g_rating = reviews_data.get("google_rating")
+    g_count = reviews_data.get("google_reviews_count")
+    praise_themes = reviews_data.get("praise_themes") or []
+    gprof = reviews_data.get("google_profile") or {}
+
+    # Punti di forza Recensioni & Reputazione (dettagliati!)
+    if g_rating is not None and g_rating >= 4.2:
+        praise_str = f" I clienti apprezzano in particolare: {', '.join(praise_themes)}." if praise_themes else ""
+        strengths.append(Finding(
+            category="reviews",
+            severity="OTTIMO",
+            title=f"Ottima reputazione media su Google ({g_rating:.1f}/5" + (f" su {g_count} recensioni)" if g_count else ")"),
+            description=(
+                f"Il ristorante gode di una valutazione media superiore alla soglia di eccellenza locale ({g_rating:.1f}/5).{praise_str}"
+            ),
+            business_impact=(
+                "Una media sopra 4.2 stelle con un buon volume di recensioni è il principale motore di fiducia su Google Maps "
+                "e permette di convertire le ricerche locali in tavoli prenotati."
+            ),
+            recommendation="Valorizzare le migliori recensioni anche sul sito web e sui social, continuando a stimolare feedback dai clienti soddisfatti.",
+        ))
+    elif reviews_data.get("positive_reviews_count", 0) >= 3:
+        praise_str = f" Punti più lodati: {', '.join(praise_themes)}." if praise_themes else ""
+        strengths.append(Finding(
+            category="reviews",
+            severity="OTTIMO",
+            title=f"Prevalenza di recensioni positive tra le più recenti su Google ({reviews_data['positive_reviews_count']} su {len(reviews_data.get('google_reviews') or [])})",
+            description=f"La maggior parte delle recensioni pubbliche in evidenza su Google è positiva (4-5 stelle).{praise_str}",
+            business_impact="Rafforza la prima impressione di chi consulta la scheda Google Maps prima di prenotare.",
+            recommendation="Ringraziare pubblicamente i clienti che lasciano recensioni positive per stimolare il ritorno in sala.",
+        ))
+
+    if reviews_data["tripadvisor_url"] or reviews_data["thefork_url"]:
+        portals = [p for p, u in (("TripAdvisor", reviews_data["tripadvisor_url"]), ("TheFork", reviews_data["thefork_url"])) if u]
+        strengths.append(Finding(
+            category="reviews",
+            severity="OTTIMO",
+            title=f"Presenza rilevata sui portali di ristorazione ({', '.join(portals)})",
+            description=f"Il ristorante è presente e indicizzato su {', '.join(portals)}, canali chiave per turisti e prenotazioni online.",
+            business_impact="Amplia la visibilità del locale oltre Google Maps, intercettando pubblico turistico e nuovi clienti in città.",
+            recommendation="Mantenere aggiornati foto, orari e risposte alle recensioni anche su questi portali.",
+        ))
+
+    if reviews_data.get("google_places_api_used") and gprof.get("has_opening_hours") and gprof.get("has_phone"):
+        strengths.append(Finding(
+            category="reviews",
+            severity="OTTIMO",
+            title="Scheda Google Maps completa di orari e telefono",
+            description="La scheda Google Business Profile espone correttamente gli orari di apertura e il recapito telefonico.",
+            business_impact="Facilita le chiamate dirette e le indicazioni stradali per chi cerca il ristorante da smartphone.",
+            recommendation="Verificare periodicamente la coerenza degli orari in occasione di festività o chiusure straordinarie.",
+        ))
+
+    # Criticità Recensioni
+    if not reviews_data["google_maps_url"] and g_rating is None:
+        rev_score -= 20
+        findings.append(Finding(
+            category="reviews",
+            severity="ALTO",
+            title="Scheda Google Business Profile non verificata o non collegata correttamente",
+            description="Non è stato possibile collegare in modo completo i dati della scheda Google Maps del ristorante.",
+            business_impact=(
+                "Google Maps genera fino al 60-70% delle nuove scoperte di un ristorante: una scheda incompleta o non presidiata "
+                "taglia fuori il locale dalle prime 3 posizioni sulla mappa della città."
+            ),
+            recommendation="Rivendicare e ottimizzare al 100% la scheda Google Business Profile (categorie, orari, foto, link sito e menù).",
+        ))
+
+    if unanswered_neg is not None and unanswered_neg > 0:
+        rev_score -= min(35, 15 + unanswered_neg * 4)
+        findings.append(Finding(
+            category="reviews",
+            severity="CRITICO",
+            title=f"{unanswered_neg} recensioni negative lasciate senza alcuna risposta",
+            description=f"Risultano {unanswered_neg} recensioni negative alle quali la direzione del ristorante non ha mai replicato.",
+            business_impact=(
+                "L'88% dei potenziali clienti legge le recensioni negative prima di prenotare. "
+                "Lasciare una critica senza risposta equivale ad ammettere la colpa davanti a centinaia di futuri clienti ogni mese, "
+                "bruciando prenotazioni ad alto margine."
+            ),
+            recommendation="Rispondere entro 48 ore a tutte le recensioni negative con tono empatico, professionale e orientato alla soluzione (mai difensivo).",
+        ))
+    elif reviews_data.get("low_rating_google_reviews_count", 0) > 0:
+        low_n = reviews_data["low_rating_google_reviews_count"]
+        neg_n = reviews_data.get("negative_reviews_count", 0)
+        themes = reviews_data.get("complaint_themes") or []
+        themes_str = f" Temi critici emersi nei testi: {', '.join(themes)}." if themes else ""
+        rev_score -= min(22, 8 + low_n * 4)
+        findings.append(Finding(
+            category="reviews",
+            severity="CRITICO" if neg_n >= 2 else "ALTO",
+            title=f"Rilevate {low_n} recensioni critiche/negative in evidenza su Google",
+            description=(
+                f"Tra le principali recensioni pubbliche mostrate da Google compaiono {neg_n} recensioni negative (1-2 stelle) "
+                f"e {reviews_data.get('neutral_reviews_count', 0)} neutre (3 stelle).{themes_str}"
+            ),
+            business_impact=(
+                "Queste recensioni sono le prime che compaiono a chi cerca il locale su Google Maps: senza risposte professionali e senza "
+                "un flusso costante di nuove recensioni positive, frenano direttamente il numero di coperti settimanali."
+            ),
+            recommendation="Replicare pubblicamente a ogni recensione critica con cortesia e intervenire operativamente sui temi segnalati dai clienti.",
+            evidence=", ".join(themes) if themes else "",
+        ))
+
+    if unanswered is not None and unanswered > 0:
+        rev_score -= min(25, 10 + (10 if unanswered >= 10 else unanswered))
+        findings.append(Finding(
+            category="reviews",
+            severity="ALTO",
+            title=f"{unanswered} recensioni totali prive di risposta dal ristorante",
+            description=f"Risultano circa {unanswered} recensioni ricevute senza alcun riscontro da parte del titolare.",
+            business_impact=(
+                "Google conferma ufficialmente che rispondere alle recensioni migliora il posizionamento locale su Maps. "
+                "Ignorare i clienti che dedicano tempo a scrivere una recensione riduce sia la visibilità sia il ritorno in sala."
+            ),
+            recommendation="Attivare una gestione settimanale strutturata per rispondere al 100% delle recensioni (positive e negative).",
+        ))
+
+    if g_rating is not None and g_rating < 4.2:
+        rev_score -= 20 if g_rating < 3.8 else 12
+        findings.append(Finding(
+            category="reviews",
+            severity="ALTO" if g_rating < 3.8 else "MEDIO",
+            title=f"Valutazione media Google sotto la soglia competitiva ({g_rating:.1f}/5)",
+            description=f"Il punteggio medio su Google ({g_rating:.1f}/5) è inferiore alla soglia di 4.3+ stelle ricercata dagli utenti.",
+            business_impact=(
+                "Su Google Maps moltissimi utenti attivano il filtro 'Valutazione 4.5+' o scartano automaticamente i locali sotto 4.2: "
+                "anche solo +0.3 stelle possono aumentare sensibilmente chiamate e prenotazioni."
+            ),
+            recommendation="Introdurre un sistema semplice in sala (es. QR code su scontrino/tavolo) per invitare i clienti soddisfatti a lasciare una recensione reale.",
+        ))
+
+    if g_count is not None and g_count < 50:
+        rev_score -= 10
+        findings.append(Finding(
+            category="reviews",
+            severity="MEDIO",
+            title=f"Volume di recensioni ancora ridotto ({g_count} recensioni su Google)",
+            description="Il numero totale di recensioni è contenuto rispetto ai principali concorrenti della zona.",
+            business_impact="Un basso numero di recensioni riduce la forza della prova sociale e penalizza il posizionamento nelle ricerche locali.",
+            recommendation="Avviare una raccolta continuativa di recensioni dai clienti abituali e soddisfatti.",
+        ))
+
+    if reviews_data.get("facebook_brightdata_used"):
+        fb_pct = reviews_data.get("facebook_recommendation_pct")
+        fb_yes = reviews_data.get("facebook_recommended_count", 0)
+        fb_no = reviews_data.get("facebook_not_recommended_count", 0)
+        if fb_pct is not None and fb_pct >= 85 and fb_yes >= 3:
+            strengths.append(Finding(
+                category="reviews",
+                severity="OTTIMO",
+                title=f"Ottimo indice di gradimento su Facebook ({fb_pct}% consiglia il locale)",
+                description=f"Tra le ultime recensioni analizzate su Facebook, {fb_yes} clienti consigliano il ristorante (contro {fb_no} non consigliato).",
+                business_impact="Un alto tasso di raccomandazione su Facebook rafforza la fiducia del pubblico locale e favorisce il passaparola.",
+                recommendation="Continuare a interagire con i commenti e valorizzare le migliori recensioni anche nei post della pagina.",
+            ))
+        elif fb_no >= 2 or (fb_pct is not None and fb_pct < 80):
+            rev_score -= 12
+            findings.append(Finding(
+                category="reviews",
+                severity="ALTO" if fb_no >= 3 else "MEDIO",
+                title=f"Recensioni critiche rilevate su Facebook ({fb_no} 'Non consiglia')",
+                description=f"Nell'analisi delle ultime recensioni Facebook emergono {fb_no} valutazioni negative ('Non consiglia').",
+                business_impact="Su Facebook le recensioni negative restano ben visibili agli amici e ai contatti locali, frenando il passaparola in città.",
+                recommendation="Rispondere in modo cordiale e costruttivo a ogni recensione negativa su Facebook e stimolare i clienti soddisfatti a lasciare un riscontro.",
+            ))
+
+    if reviews_data.get("tripadvisor_terra_used"):
+        ta_rat = reviews_data.get("tripadvisor_rating")
+        ta_cnt = reviews_data.get("tripadvisor_reviews_count")
+        ta_rk = reviews_data.get("tripadvisor_ranking")
+        ta_unans = reviews_data.get("tripadvisor_unanswered_recent")
+        if ta_rat is not None and ta_rat >= 4.0:
+            rk_str = f" ({ta_rk})" if ta_rk else ""
+            strengths.append(Finding(
+                category="reviews",
+                severity="OTTIMO",
+                title=f"Solida valutazione su TripAdvisor ({ta_rat:.1f}/5" + (f" su {ta_cnt} recensioni)" if ta_cnt else ")"),
+                description=f"Su TripAdvisor il ristorante mantiene una media di {ta_rat:.1f}/5{rk_str}, dato molto rilevante per il pubblico turistico.",
+                business_impact="Una scheda TripAdvisor ben posizionata porta prenotazioni spontanee di turisti e visitatori con scontrino medio alto.",
+                recommendation="Continuare a rispondere regolarmente alle recensioni su TripAdvisor mantenendo aggiornate foto e descrizione.",
+            ))
+        elif ta_rat is not None and ta_rat < 4.0:
+            rev_score -= 10
+            findings.append(Finding(
+                category="reviews",
+                severity="MEDIO",
+                title=f"Valutazione TripAdvisor sotto la media competitiva ({ta_rat:.1f}/5)",
+                description=f"Il punteggio medio rilevato su TripAdvisor è {ta_rat:.1f}/5" + (f" ({ta_rk})." if ta_rk else "."),
+                business_impact="I turisti su TripAdvisor tendono a scartare i locali sotto le 4 bolle, scegliendo i primi classificati in zona.",
+                recommendation="Intervenire sui temi critici emersi nelle recensioni recenti e rispondere pubblicamente con cura a ogni recensione.",
+            ))
+        if ta_unans is not None and ta_unans >= 2:
+            rev_score -= 12
+            findings.append(Finding(
+                category="reviews",
+                severity="ALTO",
+                title=f"{ta_unans} recensioni recenti su TripAdvisor prive di risposta della direzione",
+                description=f"Tra le ultime {len(reviews_data.get('tripadvisor_reviews') or [])} recensioni pubblicate su TripAdvisor, {ta_unans} non hanno ricevuto risposta dal ristorante.",
+                business_impact="Le risposte del proprietario su TripAdvisor aumentano la fiducia dei viaggiatori e segnalano attenzione verso il cliente.",
+                recommendation="Impostare una risposta personalizzata per tutte le nuove recensioni su TripAdvisor entro 48-72 ore.",
+            ))
+
+    if not reviews_data["tripadvisor_url"] and not reviews_data["thefork_url"]:
+        rev_score -= 12
+        findings.append(Finding(
+            category="reviews",
+            severity="MEDIO",
+            title="Presenza non rilevata su TripAdvisor e TheFork",
+            description="Dalle ricerche online non risultano schede ufficiali del ristorante su TripAdvisor né su TheFork.",
+            business_impact=(
+                f"In una città come {audit_input.city}, turisti e nuovi clienti usano intensamente TripAdvisor e TheFork per scoprire e prenotare ristoranti: "
+                "non presidiare questi canali significa perdere una fetta preziosa di coperti ogni settimana."
+            ),
+            recommendation="Rivendicare gratuitamente la scheda TripAdvisor (aggiornando foto e descrizione) e valutare l'attivazione strategica su TheFork.",
+        ))
+    elif not reviews_data["thefork_url"]:
+        rev_score -= 7
+        findings.append(Finding(
+            category="reviews",
+            severity="MEDIO",
+            title="Assenza su TheFork (canale di prenotazione online non presidiato)",
+            description=f"Non risulta una scheda attiva per {audit_input.restaurant_name} su TheFork.",
+            business_impact=(
+                f"Migliaia di clienti e turisti a {audit_input.city} usano TheFork come primo strumento per prenotare un tavolo in pochi secondi. "
+                "Non essere presenti lascia campo libero ai ristoranti concorrenti della zona, soprattutto nelle serate infrasettimanali."
+            ),
+            recommendation="Valutare l'inserimento su TheFork per intercettare nuovi clienti e riempire i tavoli nelle fasce orarie o giornate meno affollate.",
+        ))
+    elif not reviews_data["tripadvisor_url"]:
+        rev_score -= 7
+        findings.append(Finding(
+            category="reviews",
+            severity="MEDIO",
+            title="Scheda TripAdvisor non rilevata",
+            description=f"Non è stata individuata una scheda ristorante verificabile su TripAdvisor per {audit_input.restaurant_name}.",
+            business_impact=(
+                f"TripAdvisor rimane uno dei primi portali consultati dai turisti italiani e stranieri in visita a {audit_input.city}: "
+                "l'assenza riduce la visibilità verso una clientela ad alta capacità di spesa."
+            ),
+            recommendation="Creare o rivendicare gratuitamente la scheda TripAdvisor curando foto, descrizione multilingua e risposte alle recensioni.",
+        ))
+
+    if reviews_data.get("google_places_api_used"):
+        if gprof.get("has_opening_hours") is False:
+            rev_score -= 10
+            findings.append(Finding(
+                category="reviews",
+                severity="ALTO",
+                title="Orari di apertura mancanti sulla scheda Google Maps",
+                description="La scheda Google del ristorante non mostra gli orari di apertura settimanali.",
+                business_impact="I clienti che cercano un locale 'aperto ora' vengono esclusi automaticamente dai risultati di Google Maps.",
+                recommendation="Compilare subito orari di pranzo, cena, giorno di chiusura e aperture festive su Google Business Profile.",
+            ))
+        if isinstance(gprof.get("photos_count"), int) and gprof["photos_count"] < 5:
+            rev_score -= 8
+            findings.append(Finding(
+                category="reviews",
+                severity="MEDIO",
+                title=f"Galleria fotografica scarna su Google Maps ({gprof['photos_count']} foto rilevate)",
+                description="La scheda Google dispone di pochissime fotografie ufficiali.",
+                business_impact="Le schede con foto curate di piatti e sala ottengono fino al 42% in più di richieste di indicazioni stradali e clic al sito.",
+                recommendation="Caricare almeno 15-20 foto luminose e aggiornate di piatti signature, interni, esterno e staff.",
+            ))
+        if not gprof.get("has_phone"):
+            rev_score -= 8
+            findings.append(Finding(
+                category="reviews",
+                severity="ALTO",
+                title="Numero di telefono mancante sulla scheda Google Maps",
+                description="Non risulta alcun numero di telefono pubblico sulla scheda Google del ristorante.",
+                business_impact="Blocca le chiamate immediate con un tap da smartphone per prenotazioni in giornata.",
+                recommendation="Aggiungere il numero di telefono principale nella scheda Google Business Profile.",
+            ))
+        if gprof.get("reservable") is False:
+            rev_score -= 5
+            findings.append(Finding(
+                category="reviews",
+                severity="BASSO",
+                title="Prenotazione diretta non attiva su Google Maps",
+                description="La scheda Google non espone il pulsante di prenotazione diretta del tavolo.",
+                business_impact="Riduce la conversione immediata degli utenti che vorrebbero riservare un tavolo direttamente da Google Maps.",
+                recommendation="Collegare un link prenotazione nella scheda Google Business Profile.",
+            ))
+
+    rev_score = _clamp(rev_score)
+
+    # =========================================================================
+    # 5. VISIBILITÀ WEB & LOCAL SEO (peso 15%)
+    # =========================================================================
+    osint_score = 100
+    records_count = len(osint_data.get("search_records", []))
+    username_found = sum(s.get("found_count", 0) for s in osint_data.get("username_scans", []))
+
+    if audit_input.run_ominis_search and records_count < 4:
+        osint_score -= 30
+        findings.append(Finding(
+            category="osint",
+            severity="ALTO",
+            title=f"Scarsa presenza indicizzata sui motori di ricerca ({records_count} risultati rilevati)",
+            description=f"Le verifiche online hanno restituito pochissime citazioni pubbliche per {audit_input.restaurant_name} a {audit_input.city}.",
+            business_impact=(
+                "Una bassa presenza su portali gastronomici, guide locali e directory riduce l'autorevolezza del ristorante agli occhi di Google, "
+                "abbassando il posizionamento rispetto ai concorrenti della stessa zona."
+            ),
+            recommendation="Uniformare Nome, Indirizzo e Telefono (NAP) su Google, Apple Maps, TripAdvisor, PagineGialle e portali locali di " + audit_input.city + ".",
+        ))
+    elif records_count >= 8:
+        strengths.append(Finding(
+            category="osint",
+            severity="OTTIMO",
+            title=f"Buona visibilità sul web ({records_count} pagine e portali indicizzati)",
+            description=f"Il ristorante è ben presente in {records_count} fonti pubbliche, directory e portali online legati a {audit_input.city}.",
+            business_impact="Una solida impronta digitale rafforza l'autorevolezza del brand sui motori di ricerca e facilita la scoperta organica.",
+            recommendation="Verificare periodicamente che telefono, orari e menù siano identici e aggiornati su tutti i portali emersi.",
+        ))
+
+    if audit_input.run_ominis_username and username_found == 0 and social_data["active_core_count"] < 2:
+        osint_score -= 15
+        findings.append(Finding(
+            category="osint",
+            severity="MEDIO",
+            title="Nome profilo / brand non uniforme tra le piattaforme",
+            description="Non è emerso un nome utente coerente e facilmente riconoscibile tra i diversi canali digitali.",
+            business_impact="Quando i clienti faticano a trovare il profilo esatto per taggare il locale nelle storie, si perde passaparola gratuito.",
+            recommendation="Scegliere un unico handle semplice e coerente (@nomeristorante) da utilizzare su tutti i canali.",
+        ))
+
+    if website_data["reachable"] and not website_data["has_sitemap_xml"]:
+        osint_score -= 10
+
+    osint_score = _clamp(osint_score)
+
+    # =========================================================================
+    # PUNTEGGIO GLOBALE & SINTESI ESECUTIVA
+    # =========================================================================
+    categories = [
+        CategoryScore("website", "Sito Web & Esperienza Mobile", web_score, 0.25,
+                      "Sicurezza HTTPS, velocità, mobile, prenotazione online e SEO tecnica."),
+        CategoryScore("menu", "Menù Digitale & Aggiornamento", menu_score, 0.20,
+                      "Accessibilità del menù, aggiornamento, leggibilità da smartphone, prezzi e allergeni."),
+        CategoryScore("social", "Presenza Social & Attività", social_score, 0.20,
+                      "Presidio Instagram/Facebook/TikTok, costanza editoriale e integrazione con il sito."),
+        CategoryScore("reviews", "Recensioni & Reputazione", rev_score, 0.20,
+                      "Media voto, gestione delle recensioni, completezza scheda Google e portali di settore."),
+        CategoryScore("osint", "Visibilità Web & Local SEO", osint_score, 0.15,
+                      "Impronta digitale su motori di ricerca, directory e coerenza del brand online."),
+    ]
+
+    overall_score = _clamp(sum(c.score * c.weight for c in categories))
+    overall_grade = _grade_for_score(overall_score)
+
+    sev_rank = {"CRITICO": 0, "ALTO": 1, "MEDIO": 2, "BASSO": 3}
+    findings.sort(key=lambda f: (sev_rank.get(f.severity, 9), f.category))
+
+    crit_count = sum(1 for f in findings if f.severity == "CRITICO")
+    high_count = sum(1 for f in findings if f.severity == "ALTO")
+
+    executive_summary = (
+        f"L'analisi della presenza digitale condotta su {audit_input.restaurant_name} ({audit_input.city}) ha registrato un indice di "
+        f"salute digitale pari a {overall_score}/100 ({overall_grade}), con {len(strengths)} punti di forza già consolidati, "
+        f"{crit_count} criticità prioritarie e {high_count} aree di miglioramento ad alto impatto. "
+        f"Valorizzare ciò che già funziona e risolvere rapidamente le criticità emerse permette di recuperare prenotazioni perse ogni settimana, "
+        f"migliorare la visibilità locale su Google e trasformare chi cerca il locale online in clienti seduti al tavolo."
+    )
+
+    quick_wins = [f.recommendation for f in findings if f.severity == "CRITICO"][:4]
+    if not quick_wins:
+        quick_wins = ["Verificare l'aggiornamento di orari, foto e link al menù su Google Business Profile."]
+
+    medium_term = [f.recommendation for f in findings if f.severity == "ALTO"][:4]
+    if not medium_term:
+        medium_term = ["Avviare una routine settimanale di risposta a tutte le recensioni e pubblicazione social."]
+
+    long_term = [f.recommendation for f in findings if f.severity in ("MEDIO", "BASSO")][:4]
+    if not long_term:
+        long_term = ["Monitorare trimestralmente la reputazione online e introdurre campagne locali stagionali."]
+
+    return AuditResult(
+        audit_id=audit_id,
+        input_data=asdict(audit_input),
+        overall_score=overall_score,
+        overall_grade=overall_grade,
+        executive_summary=executive_summary,
+        category_scores=categories,
+        strengths=strengths,
+        findings=findings,
+        website_data=website_data,
+        menu_data=menu_data,
+        social_data=social_data,
+        reviews_data=reviews_data,
+        osint_data=osint_data,
+        action_plan={
+            "Interventi Immediati (Entro 7 giorni)": quick_wins,
+            "Ottimizzazione Operativa (Entro 30 giorni)": medium_term,
+            "Crescita & Consolidamento (Entro 90 giorni)": long_term,
+        },
+        warnings=warnings,
+    )

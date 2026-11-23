@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RistoAudit — Analisi Automatica Presenza Digitale Ristoranti</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #ffffff;
+      --text: #0f172a;
+      --muted: #64748b;
+      --accent: #c2410c;
+      --accent-hover: #9a3412;
+      --border: #e2e8f0;
+      --soft: #f8fafc;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #f1f5f9;
+      color: var(--text);
+      line-height: 1.5;
+    }
+    .topbar {
+      background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+      color: #fff;
+      padding: 28px 20px;
+      border-bottom: 4px solid var(--accent);
+    }
+    .container {
+      max-width: 820px;
+      margin: 0 auto;
+      padding: 0 16px;
+    }
+    .topbar h1 { margin: 0 0 6px; font-size: 1.85rem; letter-spacing: -0.02em; }
+    .topbar p { margin: 0; color: #cbd5e1; font-size: 0.96rem; }
+    .topbar-flex {
+      display: flex;
+      align-items: center;
+      gap: 22px;
+      flex-wrap: wrap;
+    }
+    .logo-wrap {
+      background: #ffffff;
+      border-radius: 14px;
+      padding: 8px 12px;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.22);
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .logo-wrap img {
+      height: 108px;
+      width: auto;
+      display: block;
+    }
+    .api-status {
+      display: inline-block;
+      font-size: 0.78rem;
+      font-weight: 700;
+      padding: 4px 10px;
+      border-radius: 999px;
+      margin-bottom: 12px;
+    }
+    .api-ok { background: #dcfce7; color: #166534; border: 1px solid #86efac; }
+    .api-off { background: #fef3c7; color: #92400e; border: 1px solid #fcd34d; }
+    .badge-brand {
+      display: inline-block;
+      background: rgba(194, 65, 12, 0.25);
+      border: 1px solid #fb923c;
+      color: #fed7aa;
+      font-size: 0.75rem;
+      font-weight: 700;
+      padding: 3px 10px;
+      border-radius: 999px;
+      margin-bottom: 10px;
+      letter-spacing: 0.04em;
+    }
+    main { padding: 28px 0 60px; }
+    .alert-err {
+      background: #fef2f2;
+      border: 1px solid #fecaca;
+      border-left: 4px solid #dc2626;
+      color: #991b1b;
+      padding: 12px 16px;
+      border-radius: 8px;
+      margin-bottom: 20px;
+      font-weight: 500;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 24px 26px;
+      margin-bottom: 18px;
+      box-shadow: 0 1px 3px rgba(15, 23, 42, 0.05);
+    }
+    .card h2 { margin: 0 0 4px; font-size: 1.15rem; color: #0f172a; }
+    .card .sub { color: var(--muted); font-size: 0.85rem; margin: 0 0 18px; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px 18px;
+    }
+    .full { grid-column: 1 / -1; }
+    @media (max-width: 680px) {
+      .grid { grid-template-columns: 1fr; }
+    }
+    label {
+      display: block;
+      font-size: 0.84rem;
+      font-weight: 600;
+      color: #334155;
+      margin-bottom: 5px;
+    }
+    label .req { color: #dc2626; }
+    input[type="text"], input[type="url"], input[type="password"], input[type="number"], input[type="date"], textarea {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid #cbd5e1;
+      border-radius: 8px;
+      font-size: 0.94rem;
+      font-family: inherit;
+      background: #fff;
+    }
+    input:focus, textarea:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(194, 65, 12, 0.12);
+    }
+    .hint { font-size: 0.77rem; color: var(--muted); margin-top: 4px; }
+    .hint a { color: var(--accent); text-decoration: none; font-weight: 600; }
+    .hint a:hover { text-decoration: underline; }
+    .auto-pills {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 16px;
+      padding-top: 14px;
+      border-top: 1px solid var(--border);
+    }
+    .pill {
+      background: #f0fdf4;
+      border: 1px solid #bbf7d0;
+      color: #166534;
+      font-size: 0.78rem;
+      font-weight: 600;
+      padding: 4px 10px;
+      border-radius: 999px;
+    }
+    details.advanced {
+      background: #fff;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px 20px;
+      margin-bottom: 18px;
+    }
+    details.advanced summary {
+      cursor: pointer;
+      font-weight: 700;
+      font-size: 0.92rem;
+      color: #334155;
+      user-select: none;
+    }
+    details.advanced[open] summary { margin-bottom: 16px; }
+    .check-inline {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.85rem;
+      font-weight: 500;
+      color: #334155;
+      margin-top: 12px;
+      cursor: pointer;
+    }
+    .check-inline input { width: 16px; height: 16px; accent-color: var(--accent); }
+    .submit-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 14px;
+      background: #0f172a;
+      color: #fff;
+      padding: 20px 24px;
+      border-radius: 12px;
+    }
+    .submit-bar p { margin: 0; font-size: 0.88rem; color: #cbd5e1; max-width: 440px; }
+    .btn-primary {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      padding: 13px 28px;
+      border-radius: 9px;
+      font-size: 1rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: background 0.15s, transform 0.1s;
+    }
+    .btn-primary:hover { background: var(--accent-hover); transform: translateY(-1px); }
+    .recent-box {
+      margin-top: 24px;
+      background: #fff;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 18px 22px;
+    }
+    .recent-box h3 { margin: 0 0 10px; font-size: 0.96rem; color: #334155; }
+    .recent-list { list-style: none; padding: 0; margin: 0; display: flex; flex-wrap: wrap; gap: 10px; }
+    .recent-list a {
+      text-decoration: none;
+      background: var(--soft);
+      border: 1px solid var(--border);
+      color: #1e293b;
+      padding: 6px 12px;
+      border-radius: 6px;
+      font-size: 0.83rem;
+      font-weight: 500;
+    }
+    .recent-list a:hover { border-color: var(--accent); color: var(--accent); }
+    #loading-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(15, 23, 42, 0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      color: #fff;
+      text-align: center;
+      padding: 24px;
+    }
+    .spinner {
+      width: 52px;
+      height: 52px;
+      border: 5px solid rgba(255,255,255,0.2);
+      border-top-color: #fb923c;
+      border-radius: 50%;
+      animation: spin 0.9s linear infinite;
+      margin-bottom: 18px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="container topbar-flex">
+      <div class="logo-wrap">
+        <img src="/assets/ristoaudit-logo.png" alt="RistoAudit Logo">
+      </div>
+      <div style="flex: 1; min-width: 260px;">
+        <div class="badge-brand">ANALISI AUTOMATICA PRESENZA DIGITALE</div>
+        <h1>Genera il Report PDF del Ristorante</h1>
+        <p>Inserisci nome, città e link Google Maps (o Place ID): RistoAudit analizza automaticamente sito web, menù, social, voto Google, recensioni positive/negative e criticità.</p>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+    {% if error %}
+    <div class="alert-err">{{ error }}</div>
+    {% endif %}
+
+    <form id="audit-form" action="/audit" method="POST">
+      <!-- BLOCCO PRINCIPALE ULTRA-RAPIDO -->
+      <section class="card">
+        <h2>1. Ristorante da Analizzare</h2>
+        <p class="sub">Basta compilare questi campi: tutto il resto viene rilevato in automatico.</p>
+        <div class="grid">
+          <div>
+            <label for="restaurant_name">Nome del Ristorante <span class="req">*</span></label>
+            <input type="text" id="restaurant_name" name="restaurant_name" required placeholder="es. Osteria del Borgo">
+          </div>
+          <div>
+            <label for="city">Città <span class="req">*</span></label>
+            <input type="text" id="city" name="city" required placeholder="es. Bologna">
+          </div>
+          <div class="full">
+            <label for="google_maps_url">Link Google Maps oppure Place ID (consigliato per precisione 100%)</label>
+            <input type="text" id="google_maps_url" name="google_maps_url" placeholder="https://maps.app.goo.gl/...  oppure  ChIJj61dQgK6j4AR4GeTYWZsKWw">
+            <div class="hint">
+              Puoi incollare il link di Google Maps oppure il Place ID da
+              <a href="https://wiremo.co/google-place-id-finder/" target="_blank" rel="noopener">Wiremo</a> /
+              <a href="https://gmapsscraper.io/tools/place-id-finder" target="_blank" rel="noopener">GMapsScraper</a>.
+              Se lo lasci vuoto, il ristorante verrà cercato automaticamente per nome e città.
+            </div>
+          </div>
+        </div>
+
+        <div class="auto-pills">
+          <span class="pill">✓ Sito Web &amp; SSL</span>
+          <span class="pill">✓ Menù HTML/PDF &amp; Data</span>
+          <span class="pill">✓ Social &amp; Portali</span>
+          <span class="pill">✓ Media Voto &amp; Totale Recensioni</span>
+          <span class="pill">✓ Recensioni Positive / Negative</span>
+          <span class="pill">✓ Temi Critici &amp; Piano d'Azione PDF</span>
+        </div>
+      </section>
+
+      <!-- FIRMA REPORT (SALVABILE IN LOCALE) -->
+      <section class="card">
+        <h2>2. Firma e Contatti sul Report PDF</h2>
+        <p class="sub">Questi dati compaiono in intestazione e nell'invito finale al contatto.</p>
+        {% if saved.google_places_api_key %}
+        <div class="api-status api-ok">✓ Google Places attiva</div>
+        {% else %}
+        <div class="api-status api-off">⚠ Google Places API Key non configurata</div>
+        {% endif %}
+        {% if saved.tripadvisor_terra_api_key %}
+        <div class="api-status api-ok">✓ TripAdvisor Terra attiva</div>
+        {% endif %}
+        {% if saved.brightdata_api_key %}
+        <div class="api-status api-ok">✓ Recensioni Facebook attive</div>
+        {% endif %}
+        <div class="grid">
+          <div>
+            <label for="consultant_name">Nome Agenzia / Consulente</label>
+            <input type="text" id="consultant_name" name="consultant_name" value="{{ saved.consultant_name }}" placeholder="RistoAudit">
+          </div>
+          <div>
+            <label for="consultant_contact">Contatto (email / telefono nel PDF)</label>
+            <input type="text" id="consultant_contact" name="consultant_contact" value="{{ saved.consultant_contact }}" placeholder="es. info@ristoaudit.it | +39 333 1234567">
+          </div>
+        </div>
+        <label class="check-inline">
+          <input type="checkbox" name="remember_settings" value="1" checked>
+          Ricorda questi dati in locale per i prossimi report
+        </label>
+      </section>
+
+      <!-- CAMPI OPZIONALI AVANZATI (CHIUSI DI DEFAULT) -->
+      <details class="advanced">
+        <summary>+ Integrazioni manuali opzionali (social, sito/menù, recensioni senza risposta, API Key)</summary>
+        <p class="sub" style="margin-bottom:14px;">Usa questi campi solo se vuoi aggiungere link social non presenti sul sito, forzare un URL specifico o aggiornare la chiave Google Places.</p>
+        <div class="grid">
+          <div>
+            <label for="google_places_api_key">Google Places API Key (solo per configurarla o cambiarla)</label>
+            <input type="password" id="google_places_api_key" name="google_places_api_key" value="{{ saved.google_places_api_key }}" placeholder="AIza...">
+          </div>
+          <div>
+            <label for="tripadvisor_terra_api_key">TripAdvisor Terra API Key (opzionale)</label>
+            <input type="password" id="tripadvisor_terra_api_key" name="tripadvisor_terra_api_key" value="{{ saved.tripadvisor_terra_api_key }}" placeholder="Chiave Terra API...">
+          </div>
+          <div class="full">
+            <label for="brightdata_api_key">Bright Data API Key per Recensioni Facebook (opzionale)</label>
+            <input type="password" id="brightdata_api_key" name="brightdata_api_key" value="{{ saved.brightdata_api_key }}" placeholder="Bearer API key...">
+          </div>
+          <div>
+            <label for="unanswered_reviews_count">Recensioni senza risposta (stima manuale)</label>
+            <input type="number" id="unanswered_reviews_count" name="unanswered_reviews_count" min="0" placeholder="es. 25">
+          </div>
+          <div>
+            <label for="unanswered_negative_reviews">Di cui negative senza risposta</label>
+            <input type="number" id="unanswered_negative_reviews" name="unanswered_negative_reviews" min="0" placeholder="es. 6">
+          </div>
+          <div>
+            <label for="website_url">URL Sito Web (solo se diverso da Google)</label>
+            <input type="url" id="website_url" name="website_url" placeholder="https://www.esempio.it">
+          </div>
+          <div>
+            <label for="menu_url">URL diretto Menù HTML/PDF</label>
+            <input type="url" id="menu_url" name="menu_url" placeholder="https://.../menu.pdf">
+          </div>
+          <div>
+            <label for="last_social_post_date">Data ultimo post social (se nota)</label>
+            <input type="date" id="last_social_post_date" name="last_social_post_date">
+          </div>
+          <div>
+            <label for="social_handle">Handle / Nome profilo social principale</label>
+            <input type="text" id="social_handle" name="social_handle" placeholder="es. osteriadelborgo (senza @)">
+          </div>
+          <div>
+            <label for="instagram_url">URL Instagram</label>
+            <input type="url" id="instagram_url" name="instagram_url" placeholder="https://www.instagram.com/...">
+          </div>
+          <div>
+            <label for="facebook_url">URL Facebook</label>
+            <input type="url" id="facebook_url" name="facebook_url" placeholder="https://www.facebook.com/...">
+          </div>
+          <div>
+            <label for="tiktok_url">URL TikTok</label>
+            <input type="url" id="tiktok_url" name="tiktok_url" placeholder="https://www.tiktok.com/@...">
+          </div>
+          <div>
+            <label for="cuisine_type">Tipo di cucina</label>
+            <input type="text" id="cuisine_type" name="cuisine_type" placeholder="es. Pizzeria / Pesce / Tradizionale">
+          </div>
+          <div class="full">
+            <label for="reviews_notes">Note aggiuntive per il report</label>
+            <textarea id="reviews_notes" name="reviews_notes" rows="2" placeholder="Eventuali osservazioni extra da includere nel PDF..."></textarea>
+          </div>
+        </div>
+      </details>
+
+      <input type="hidden" name="run_ominis_search" value="1">
+      <input type="hidden" name="run_ominis_username" value="1">
+      <input type="hidden" name="deep_link_check" value="1">
+
+      <div class="submit-bar">
+        <p>RistoAudit eseguirà automaticamente tutte le verifiche e preparerà il Report PDF pronto da consegnare al ristorante.</p>
+        <button type="submit" class="btn-primary">Genera Report PDF Automatico →</button>
+      </div>
+    </form>
+
+    {% if recent_pdfs %}
+    <div class="recent-box">
+      <h3>Report PDF Generati di Recente</h3>
+      <ul class="recent-list">
+        {% for pdf in recent_pdfs %}
+        <li><a href="/download/{{ pdf }}">📄 {{ pdf }}</a></li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+  </main>
+
+  <div id="loading-overlay">
+    <div class="spinner"></div>
+    <h2 style="margin:0 0 8px;">Analisi automatica in corso...</h2>
+    <p style="margin:0; color:#cbd5e1; max-width:440px;">Stiamo recuperando scheda Google, recensioni, sito web, menù digitale e canali social per generare il report PDF.</p>
+  </div>
+
+  <script>
+    document.getElementById("audit-form").addEventListener("submit", function () {
+      document.getElementById("loading-overlay").style.display = "flex";
+    });
+  </script>
+</body>
+</html>

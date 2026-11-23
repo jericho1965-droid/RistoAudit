@@ -1,0 +1,17 @@
+# File segreti e chiavi API locali (MAI su GitHub!)
+.ristoaudit_settings.json
+.env
+.env.*
+
+# Report generati (contengono dati clienti e chiavi nel JSON)
+reports/*.pdf
+reports/*.json
+
+# Python / macOS
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+.DS_Store
+*.log

@@ -1,0 +1,306 @@
+#!/usr/bin/env python3
+"""Server Web locale per RistoAudit (Python stdlib + Jinja2, zero dipendenze extra)."""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import hmac
+import json
+import os
+import urllib.parse
+import webbrowser
+from dataclasses import asdict
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+from jinja2 import Environment, FileSystemLoader, select_autoescape
+
+from ristoaudit.models import AuditInput
+from ristoaudit.pdf_report import generate_pdf_report
+from ristoaudit.scoring import run_full_audit
+
+BASE_DIR = Path(__file__).resolve().parent
+TEMPLATES_DIR = BASE_DIR / "templates"
+REPORTS_DIR = BASE_DIR / "reports"
+SETTINGS_FILE = BASE_DIR / ".ristoaudit_settings.json"
+REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
+jinja_env = Environment(
+    loader=FileSystemLoader(str(TEMPLATES_DIR)),
+    autoescape=select_autoescape(["html", "xml"]),
+)
+
+
+def _load_saved_settings() -> dict[str, str]:
+    defaults = {
+        "google_places_api_key": os.environ.get("GOOGLE_PLACES_API_KEY", ""),
+        "tripadvisor_terra_api_key": os.environ.get("TRIPADVISOR_TERRA_API_KEY", ""),
+        "brightdata_api_key": os.environ.get("BRIGHTDATA_API_KEY", ""),
+        "consultant_name": "RistoAudit",
+        "consultant_contact": "",
+    }
+    if SETTINGS_FILE.exists():
+        try:
+            saved = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+            if isinstance(saved, dict):
+                for k in defaults:
+                    if saved.get(k):
+                        defaults[k] = str(saved[k])
+        except Exception:
+            pass
+    return defaults
+
+
+def _save_settings(
+    api_key: str,
+    ta_api_key: str,
+    bd_api_key: str,
+    consultant_name: str,
+    consultant_contact: str,
+) -> None:
+    payload = {
+        "google_places_api_key": api_key.strip(),
+        "tripadvisor_terra_api_key": ta_api_key.strip(),
+        "brightdata_api_key": bd_api_key.strip(),
+        "consultant_name": consultant_name.strip() or "RistoAudit",
+        "consultant_contact": consultant_contact.strip(),
+    }
+    try:
+        SETTINGS_FILE.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _form_val(params: dict[str, list[str]], key: str, default: str = "") -> str:
+    vals = params.get(key)
+    return vals[0].strip() if vals else default
+
+
+def _form_bool(params: dict[str, list[str]], key: str, default: bool = False) -> bool:
+    if key not in params:
+        return default
+    return params[key][0].lower() in ("1", "true", "on", "yes")
+
+
+class RistoAuditHandler(BaseHTTPRequestHandler):
+    def log_message(self, format: str, *args) -> None:
+        print(f"[RistoAudit] {self.address_string()} - {format % args}")
+
+    def _require_auth(self) -> bool:
+        """Se RISTOAUDIT_PASSWORD e' impostata nell'ambiente, protegge l'app con Basic Auth."""
+        expected_pwd = os.environ.get("RISTOAUDIT_PASSWORD", "").strip()
+        if not expected_pwd:
+            return True
+        expected_user = os.environ.get("RISTOAUDIT_USER", "admin").strip() or "admin"
+        auth_header = self.headers.get("Authorization", "")
+        if auth_header.startswith("Basic "):
+            try:
+                decoded = base64.b64decode(auth_header[6:].strip()).decode("utf-8", errors="replace")
+                user, _, pwd = decoded.partition(":")
+                if hmac.compare_digest(user, expected_user) and hmac.compare_digest(pwd, expected_pwd):
+                    return True
+            except Exception:
+                pass
+        self.send_response(HTTPStatus.UNAUTHORIZED)
+        self.send_header("WWW-Authenticate", 'Basic realm="RistoAudit Area Riservata"')
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"Accesso riservato. Inserisci username e password.")
+        return False
+
+    def _send_html(self, content: str, status: int = 200) -> None:
+        encoded = content.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
+    def _send_json(self, payload: dict, status: int = 200) -> None:
+        encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
+    def do_GET(self) -> None:
+        parsed = urllib.parse.urlsplit(self.path)
+        path = parsed.path
+
+        if path == "/health":
+            self._send_json({"status": "ok", "service": "RistoAudit"})
+            return
+
+        if not self._require_auth():
+            return
+
+        if path == "/" or path == "/index.html":
+            recent_pdfs = sorted(
+                REPORTS_DIR.glob("*.pdf"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )[:8]
+            tpl = jinja_env.get_template("index.html")
+            self._send_html(
+                tpl.render(
+                    recent_pdfs=[p.name for p in recent_pdfs],
+                    saved=_load_saved_settings(),
+                    error="",
+                )
+            )
+            return
+
+        if path == "/assets/ristoaudit-logo.png":
+            logo_candidates = [BASE_DIR / "ristoaudit-logo.png", REPORTS_DIR / "ristoaudit-logo.png"]
+            logo_file = next((p for p in logo_candidates if p.exists()), None)
+            if not logo_file:
+                self.send_error(HTTPStatus.NOT_FOUND, "Logo non trovato")
+                return
+            data = logo_file.read_bytes()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Cache-Control", "public, max-age=3600")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+
+        if path.startswith("/download/"):
+            filename = urllib.parse.unquote(path[len("/download/"):])
+            if "/" in filename or "\\" in filename or ".." in filename or not filename.endswith(".pdf"):
+                self.send_error(HTTPStatus.BAD_REQUEST, "Nome file non valido")
+                return
+            pdf_file = REPORTS_DIR / filename
+            if not pdf_file.exists():
+                self.send_error(HTTPStatus.NOT_FOUND, "Report PDF non trovato")
+                return
+            data = pdf_file.read_bytes()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/pdf")
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+
+        self.send_error(HTTPStatus.NOT_FOUND, "Pagina non trovata")
+
+    def do_POST(self) -> None:
+        if not self._require_auth():
+            return
+
+        parsed = urllib.parse.urlsplit(self.path)
+        if parsed.path != "/audit":
+            self.send_error(HTTPStatus.NOT_FOUND, "Endpoint non trovato")
+            return
+
+        content_length = int(self.headers.get("Content-Length", "0"))
+        raw_body = self.rfile.read(content_length).decode("utf-8", errors="replace")
+        params = urllib.parse.parse_qs(raw_body, keep_blank_values=True)
+
+        restaurant_name = _form_val(params, "restaurant_name")
+        city = _form_val(params, "city")
+
+        if not restaurant_name or not city:
+            tpl = jinja_env.get_template("index.html")
+            self._send_html(
+                tpl.render(
+                    recent_pdfs=[],
+                    saved=_load_saved_settings(),
+                    error="Inserisci almeno il Nome del Ristorante e la Città.",
+                ),
+                status=400,
+            )
+            return
+
+        saved = _load_saved_settings()
+        api_key = _form_val(params, "google_places_api_key") or saved["google_places_api_key"]
+        ta_api_key = _form_val(params, "tripadvisor_terra_api_key") or saved["tripadvisor_terra_api_key"]
+        bd_api_key = _form_val(params, "brightdata_api_key") or saved["brightdata_api_key"]
+        consultant_name = _form_val(params, "consultant_name") or saved["consultant_name"]
+        consultant_contact = _form_val(params, "consultant_contact") or saved["consultant_contact"]
+
+        if _form_bool(params, "remember_settings"):
+            _save_settings(api_key, ta_api_key, bd_api_key, consultant_name, consultant_contact)
+
+        # Il campo google_maps_or_place_id accetta sia un link Google Maps sia un Place ID (ChIJ...)
+        maps_or_pid = _form_val(params, "google_maps_url")
+        explicit_pid = _form_val(params, "google_place_id")
+        if not explicit_pid and maps_or_pid.startswith("ChIJ"):
+            explicit_pid = maps_or_pid
+            maps_or_pid = ""
+
+        audit_input = AuditInput(
+            restaurant_name=restaurant_name,
+            city=city,
+            address=_form_val(params, "address"),
+            cuisine_type=_form_val(params, "cuisine_type"),
+            consultant_name=consultant_name,
+            consultant_contact=consultant_contact,
+            website_url=_form_val(params, "website_url"),
+            menu_url=_form_val(params, "menu_url"),
+            known_menu_year=_form_val(params, "known_menu_year"),
+            social_handle=_form_val(params, "social_handle"),
+            instagram_url=_form_val(params, "instagram_url"),
+            facebook_url=_form_val(params, "facebook_url"),
+            tiktok_url=_form_val(params, "tiktok_url"),
+            last_social_post_date=_form_val(params, "last_social_post_date"),
+            google_maps_url=maps_or_pid,
+            google_place_id=explicit_pid,
+            tripadvisor_url=_form_val(params, "tripadvisor_url"),
+            thefork_url=_form_val(params, "thefork_url"),
+            google_rating=_form_val(params, "google_rating"),
+            google_reviews_count=_form_val(params, "google_reviews_count"),
+            tripadvisor_rating=_form_val(params, "tripadvisor_rating"),
+            unanswered_reviews_count=_form_val(params, "unanswered_reviews_count"),
+            unanswered_negative_reviews=_form_val(params, "unanswered_negative_reviews"),
+            reviews_notes=_form_val(params, "reviews_notes"),
+            google_places_api_key=api_key,
+            tripadvisor_terra_api_key=ta_api_key,
+            brightdata_api_key=bd_api_key,
+            run_ominis_search=_form_bool(params, "run_ominis_search", default=True),
+            run_ominis_username=_form_bool(params, "run_ominis_username", default=True),
+            deep_link_check=_form_bool(params, "deep_link_check", default=True),
+        )
+
+        result = run_full_audit(audit_input)
+        pdf_path = generate_pdf_report(result, REPORTS_DIR)
+
+        json_path = pdf_path.with_suffix(".json")
+        json_path.write_text(json.dumps(asdict(result), indent=2, ensure_ascii=False), encoding="utf-8")
+
+        tpl = jinja_env.get_template("result.html")
+        self._send_html(tpl.render(result=result, pdf_filename=pdf_path.name))
+
+
+def main() -> None:
+    env_port = os.environ.get("PORT", "").strip()
+    default_host = "0.0.0.0" if env_port else "127.0.0.1"
+    default_port = int(env_port) if env_port.isdigit() else 8765
+
+    parser = argparse.ArgumentParser(description="RistoAudit - Analisi Presenza Digitale Ristoranti")
+    parser.add_argument("--host", default=default_host, help=f"Host di ascolto (default: {default_host})")
+    parser.add_argument("--port", type=int, default=default_port, help=f"Porta HTTP (default: {default_port})")
+    parser.add_argument("--open", action="store_true", help="Apri automaticamente il browser")
+    args = parser.parse_args()
+
+    server = ThreadingHTTPServer((args.host, args.port), RistoAuditHandler)
+    url = f"http://{args.host}:{args.port}"
+    auth_state = "ATTIVA (Basic Auth)" if os.environ.get("RISTOAUDIT_PASSWORD") else "Disattiva (uso locale)"
+    print(f"\n  RistoAudit attivo su: {url}")
+    print(f"  Protezione password: {auth_state}")
+    print(f"  I report PDF vengono salvati in: {REPORTS_DIR}\n")
+    if args.open:
+        webbrowser.open(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nServer arrestato.")
+        server.server_close()
+
+
+if __name__ == "__main__":
+    main()

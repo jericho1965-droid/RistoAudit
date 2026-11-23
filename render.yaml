@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: ristoaudit
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: RISTOAUDIT_USER
+        value: admin
+      - key: RISTOAUDIT_PASSWORD
+        sync: false
+      - key: GOOGLE_PLACES_API_KEY
+        sync: false
+      - key: TRIPADVISOR_TERRA_API_KEY
+        sync: false
+      - key: BRIGHTDATA_API_KEY
+        sync: false
