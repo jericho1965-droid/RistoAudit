@@ -35,11 +35,11 @@ jinja_env = Environment(
 
 def _load_saved_settings() -> dict[str, str]:
     defaults = {
-        "google_places_api_key": os.environ.get("GOOGLE_PLACES_API_KEY", ""),
-        "tripadvisor_terra_api_key": os.environ.get("TRIPADVISOR_TERRA_API_KEY", ""),
-        "brightdata_api_key": os.environ.get("BRIGHTDATA_API_KEY", ""),
-        "consultant_name": "RistoAudit",
-        "consultant_contact": "",
+        "google_places_api_key": os.environ.get("GOOGLE_PLACES_API_KEY") or os.environ.get("google_places_api_key", ""),
+        "tripadvisor_terra_api_key": os.environ.get("TRIPADVISOR_TERRA_API_KEY") or os.environ.get("tripadvisor_terra_api_key", ""),
+        "brightdata_api_key": os.environ.get("BRIGHTDATA_API_KEY") or os.environ.get("brightdata_api_key", ""),
+        "consultant_name": os.environ.get("CONSULTANT_NAME") or os.environ.get("consultant_name") or "RistoAudit",
+        "consultant_contact": os.environ.get("CONSULTANT_CONTACT") or os.environ.get("consultant_contact", ""),
     }
     if SETTINGS_FILE.exists():
         try:
@@ -103,12 +103,20 @@ class RistoAuditHandler(BaseHTTPRequestHandler):
                     return True
             except Exception:
                 pass
+        body = b"Accesso riservato. Inserisci username e password."
         self.send_response(HTTPStatus.UNAUTHORIZED)
         self.send_header("WWW-Authenticate", 'Basic realm="RistoAudit Area Riservata"')
         self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(b"Accesso riservato. Inserisci username e password.")
+        self.wfile.write(body)
         return False
+
+    def do_HEAD(self) -> None:
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def _send_html(self, content: str, status: int = 200) -> None:
         encoded = content.encode("utf-8")
