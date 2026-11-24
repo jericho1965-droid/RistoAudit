@@ -320,6 +320,8 @@ def fetch_google_places_data(
         return {}
 
     reviews = _parse_google_reviews(place_obj.get("reviews") or [])
+    if not reviews:
+        print(f"[RistoAudit] Google Places 200 ma 0 reviews: id={place_id} name={place_obj.get('displayName')} keys={sorted(place_obj.keys())}")
     pos_count = sum(1 for r in reviews if r["sentiment"] == "positiva")
     neu_count = sum(1 for r in reviews if r["sentiment"] == "neutra")
     neg_count = sum(1 for r in reviews if r["sentiment"] == "negativa")
@@ -638,30 +640,27 @@ def fetch_google_maps_brightdata_reviews(
     if not key or not url or "google." not in url.lower() and "goo.gl" not in url.lower():
         return {}
 
-    endpoint = (
-        "https://api.brightdata.com/datasets/v3/scrape"
-        "?dataset_id=gd_luzfs1dn2oa0teb81&notify=false&include_errors=true"
+    # Usa /trigger (asincrono, risponde in <1s con snapshot_id -> nessun read timeout!)
+    trigger_url = (
+        "https://api.brightdata.com/datasets/v3/trigger"
+        "?dataset_id=gd_luzfs1dn2oa0teb81&include_errors=true&limit_per_input="
+        + str(limit_per_input)
     )
     headers = {
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
     }
-    payload = {
-        "input": [{"url": url, "days_limit": 120}],
-        "limit_per_input": limit_per_input,
-    }
+    payload = [{"url": url, "days_limit": 60}]
 
     rows: list[dict[str, Any]] = []
     try:
-        with httpx.Client(verify=certifi.where(), timeout=40.0) as client:
-            resp = client.post(endpoint, headers=headers, json=payload)
-            if resp.status_code == 200:
-                rows = _parse_brightdata_payload(resp.text)
-            elif resp.status_code == 202:
+        with httpx.Client(verify=certifi.where(), timeout=15.0) as client:
+            resp = client.post(trigger_url, headers=headers, json=payload)
+            if resp.status_code in (200, 202):
                 snap = resp.json().get("snapshot_id")
                 if snap:
                     snap_url = f"https://api.brightdata.com/datasets/v3/snapshot/{snap}?format=json"
-                    for _ in range(7):
+                    for _ in range(13):
                         time.sleep(4)
                         r_snap = client.get(snap_url, headers=headers)
                         if r_snap.status_code == 200:
@@ -671,9 +670,9 @@ def fetch_google_maps_brightdata_reviews(
                             print(f"[RistoAudit] Bright Data Google snapshot HTTP {r_snap.status_code}: {r_snap.text[:200]}")
                             break
                     if not rows:
-                        print(f"[RistoAudit] Bright Data Google snapshot {snap} non completato entro timeout")
+                        print(f"[RistoAudit] Bright Data Google snapshot {snap} non completato entro 52s")
             else:
-                print(f"[RistoAudit] Bright Data Google Maps HTTP {resp.status_code}: {resp.text[:250]}")
+                print(f"[RistoAudit] Bright Data Google Maps trigger HTTP {resp.status_code}: {resp.text[:250]}")
                 return {}
     except Exception as exc:
         print(f"[RistoAudit] Errore Bright Data Google Maps API: {exc}")
@@ -1102,7 +1101,7 @@ def run_reputation_and_social_audit(
 
         if fut_bd_g:
             try:
-                bd_g_data = fut_bd_g.result(timeout=55)
+                bd_g_data = fut_bd_g.result(timeout=62)
             except Exception as exc:
                 print(f"[RistoAudit] Timeout/errore Bright Data Google: {exc}")
         try:
