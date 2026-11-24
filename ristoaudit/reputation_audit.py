@@ -771,39 +771,37 @@ def fetch_facebook_brightdata_reviews(
         return {}
 
     reviews_url = f"{base}/reviews/" if not base.lower().endswith("/reviews") else f"{base}/"
-    endpoint = (
-        "https://api.brightdata.com/datasets/v3/scrape"
-        "?dataset_id=gd_m0dtqpiu1mbcyc2g86&notify=false&include_errors=true"
+    trigger_url = (
+        "https://api.brightdata.com/datasets/v3/trigger"
+        "?dataset_id=gd_m0dtqpiu1mbcyc2g86&include_errors=true"
     )
     headers = {
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
     }
-    payload = {
-        "input": [{"url": reviews_url, "num_of_reviews": num_of_reviews}],
-        "limit_per_input": None,
-    }
+    payload = [{"url": reviews_url, "num_of_reviews": num_of_reviews}]
 
     rows: list[dict[str, Any]] = []
     try:
-        with httpx.Client(verify=certifi.where(), timeout=35.0) as client:
-            resp = client.post(endpoint, headers=headers, json=payload)
-            if resp.status_code == 200:
-                rows = _parse_brightdata_payload(resp.text)
-            elif resp.status_code == 202:
+        with httpx.Client(verify=certifi.where(), timeout=15.0) as client:
+            resp = client.post(trigger_url, headers=headers, json=payload)
+            if resp.status_code in (200, 202):
                 snap = resp.json().get("snapshot_id")
                 if snap:
                     snap_url = f"https://api.brightdata.com/datasets/v3/snapshot/{snap}?format=json"
-                    for _ in range(5):
+                    for _ in range(13):
                         time.sleep(4)
                         r_snap = client.get(snap_url, headers=headers)
                         if r_snap.status_code == 200:
                             rows = _parse_brightdata_payload(r_snap.text)
                             break
                         if r_snap.status_code not in (202, 404):
+                            print(f"[RistoAudit] Bright Data FB snapshot HTTP {r_snap.status_code}: {r_snap.text[:200]}")
                             break
+                    if not rows:
+                        print(f"[RistoAudit] Bright Data FB snapshot {snap} non completato entro 52s")
             else:
-                print(f"[RistoAudit] Bright Data Facebook HTTP {resp.status_code}: {resp.text[:250]}")
+                print(f"[RistoAudit] Bright Data Facebook trigger HTTP {resp.status_code}: {resp.text[:250]}")
                 return {}
     except Exception as exc:
         print(f"[RistoAudit] Errore Bright Data Facebook API: {exc}")
@@ -1110,7 +1108,7 @@ def run_reputation_and_social_audit(
             print(f"[RistoAudit] Timeout/errore TripAdvisor Terra: {exc}")
         if fut_fb:
             try:
-                fb_rev_data = fut_fb.result(timeout=55)
+                fb_rev_data = fut_fb.result(timeout=62)
             except Exception as exc:
                 print(f"[RistoAudit] Timeout/errore Bright Data Facebook: {exc}")
 
