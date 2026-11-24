@@ -398,6 +398,31 @@ def get_city_restaurants(
         with ThreadPoolExecutor(max_workers=20) as pool:
             restaurants = list(pool.map(_enrich_from_website, restaurants))
 
+        # Preserva eventuali campi compilati manualmente nel file JSON precedente
+        if cache_file.exists():
+            try:
+                old_data = json.loads(cache_file.read_text(encoding="utf-8"))
+                old_by_pid = {
+                    str(r.get("google_place_id") or r.get("place_id") or ""): r
+                    for r in (old_data.get("restaurants") or [])
+                    if isinstance(r, dict)
+                }
+                manual_keys = (
+                    "instagram_url", "company_instagram", "facebook_url", "company_facebook",
+                    "tiktok_url", "social_handle", "website_url", "website", "menu_url",
+                    "menu_link", "tripadvisor_url", "thefork_url", "cuisine_type", "category",
+                    "type", "reviews_notes", "google_maps_url", "location_link", "email",
+                )
+                for r in restaurants:
+                    pid_k = str(r.get("google_place_id") or r.get("place_id") or "")
+                    old_r = old_by_pid.get(pid_k)
+                    if old_r:
+                        for mk in manual_keys:
+                            if not r.get(mk) and old_r.get(mk):
+                                r[mk] = old_r[mk]
+            except Exception:
+                pass
+
         payload = {
             "city": city_clean,
             "count": len(restaurants),
@@ -416,4 +441,96 @@ def get_city_restaurants(
         "file": cache_file.name,
         "csv_file": csv_file.name,
         "restaurants": restaurants,
+    }
+
+
+def _apply_updates_to_row(row: dict[str, Any], updates: dict[str, Any], overwrite_empty: bool = False) -> None:
+    """Aggiorna i campi RistoAudit e i corrispondenti campi Outscraper su una riga ristorante."""
+    field_pairs = [
+        ("restaurant_name", ("name", "name_for_emails")),
+        ("cuisine_type", ("category", "type")),
+        ("google_maps_url", ("location_link",)),
+        ("website_url", ("website",)),
+        ("menu_url", ("menu_link",)),
+        ("instagram_url", ("company_instagram",)),
+        ("facebook_url", ("company_facebook",)),
+        ("tiktok_url", ()),
+        ("social_handle", ()),
+        ("tripadvisor_url", ()),
+        ("thefork_url", ()),
+        ("reviews_notes", ()),
+        ("address", ()),
+    ]
+    for primary_key, mirror_keys in field_pairs:
+        if primary_key not in updates:
+            continue
+        raw_val = updates.get(primary_key)
+        val = str(raw_val).strip() if raw_val is not None else ""
+        if not val and not overwrite_empty:
+            continue
+        row[primary_key] = val
+        for mk in mirror_keys:
+            row[mk] = val
+        if primary_key == "website_url":
+            row["domain"] = urllib.parse.urlsplit(val).netloc.removeprefix("www.") if val else ""
+
+
+def update_restaurant_in_city_cache(
+    city: str,
+    updates: dict[str, Any],
+    overwrite_empty: bool = False,
+) -> dict[str, Any]:
+    """Salva i campi compilati manualmente dall'operatore nel file JSON e CSV della citta'."""
+    city_clean = (city or "").strip()
+    if not city_clean:
+        return {"updated": False, "reason": "missing_city"}
+
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    slug = _city_slug(city_clean)
+    cache_file = DATA_DIR / f"restaurants_{slug}.json"
+    csv_file = DATA_DIR / f"restaurants_{slug}.csv"
+
+    if not cache_file.exists():
+        return {"updated": False, "reason": "city_file_not_found"}
+
+    try:
+        cached_data = json.loads(cache_file.read_text(encoding="utf-8"))
+        restaurants = cached_data.get("restaurants")
+        if not isinstance(restaurants, list):
+            return {"updated": False, "reason": "invalid_cache"}
+    except Exception as exc:
+        return {"updated": False, "reason": str(exc)}
+
+    target_pid = str(updates.get("google_place_id") or updates.get("place_id") or "").strip()
+    target_name = str(updates.get("restaurant_name") or updates.get("name") or "").strip().lower()
+
+    matched_row: dict[str, Any] | None = None
+    for r in restaurants:
+        r_pid = str(r.get("google_place_id") or r.get("place_id") or "").strip()
+        r_name = str(r.get("restaurant_name") or r.get("name") or "").strip().lower()
+        if target_pid and r_pid == target_pid:
+            matched_row = r
+            break
+        if target_name and r_name == target_name:
+            matched_row = r
+            break
+
+    if matched_row is None:
+        return {"updated": False, "reason": "restaurant_not_found"}
+
+    _apply_updates_to_row(matched_row, updates, overwrite_empty=overwrite_empty)
+
+    payload = {
+        "city": cached_data.get("city", city_clean),
+        "count": len(restaurants),
+        "restaurants": restaurants,
+    }
+    cache_file.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    _save_csv_export(csv_file, restaurants)
+
+    return {
+        "updated": True,
+        "file": cache_file.name,
+        "csv_file": csv_file.name,
+        "restaurant": matched_row,
     }

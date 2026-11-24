@@ -290,6 +290,7 @@
             </div>
             <div id="city_load_status" class="hint" style="color:#9a3412; font-weight:600;"></div>
             <div id="city_export_links" class="hint" style="display:none; margin-top:6px;">
+              <button type="button" id="save_manual_fields_btn" style="display:none; margin-right:10px; padding:3px 10px; border:1px solid #c2410c; border-radius:6px; background:#fff; color:#c2410c; cursor:pointer; font-weight:700; font-size:0.78rem;">💾 Salva modifiche nel file</button>
               <a id="download_csv_link" href="#" style="margin-right:12px;">📥 Scarica Excel/CSV</a>
               <a id="download_json_link" href="#">📥 Scarica JSON</a>
             </div>
@@ -423,6 +424,7 @@
       const refreshBtn = document.getElementById("refresh_restaurants_btn");
       const statusEl = document.getElementById("city_load_status");
       const exportLinksEl = document.getElementById("city_export_links");
+      const saveBtn = document.getElementById("save_manual_fields_btn");
       const csvLinkEl = document.getElementById("download_csv_link");
       const jsonLinkEl = document.getElementById("download_json_link");
       let loadedRestaurants = [];
@@ -468,6 +470,7 @@
           restSelect.innerHTML = '<option value="">— Prima seleziona una città —</option>';
           restSelect.disabled = true;
           refreshBtn.style.display = "none";
+          saveBtn.style.display = "none";
           exportLinksEl.style.display = "none";
           statusEl.textContent = "";
           loadedRestaurants = [];
@@ -525,6 +528,40 @@
         const idx = parseInt(restSelect.value, 10);
         if (!isNaN(idx) && loadedRestaurants[idx]) {
           populateForm(loadedRestaurants[idx]);
+          saveBtn.style.display = "inline-block";
+        } else {
+          saveBtn.style.display = "none";
+        }
+      });
+
+      saveBtn.addEventListener("click", async function () {
+        const idx = parseInt(restSelect.value, 10);
+        if (isNaN(idx) || !loadedRestaurants[idx]) return;
+        const payload = {};
+        fieldIds.forEach(function (fid) {
+          const el = document.getElementById(fid);
+          if (el) payload[fid] = el.value;
+        });
+        saveBtn.disabled = true;
+        saveBtn.textContent = "Salvataggio...";
+        try {
+          const resp = await fetch("/api/restaurants/update", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+          });
+          const data = await resp.json();
+          if (data.updated && data.restaurant) {
+            loadedRestaurants[idx] = data.restaurant;
+            statusEl.textContent = "✓ Modifiche salvate in data/" + data.file + " e data/" + data.csv_file + "!";
+          } else {
+            statusEl.textContent = "Impossibile salvare: " + (data.reason || data.error || "errore");
+          }
+        } catch (e) {
+          statusEl.textContent = "Errore di rete durante il salvataggio.";
+        } finally {
+          saveBtn.disabled = false;
+          saveBtn.textContent = "💾 Salva modifiche nel file";
         }
       });
     })();

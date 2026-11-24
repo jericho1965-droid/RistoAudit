@@ -20,7 +20,12 @@ from typing import Any
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from ristoaudit.city_restaurants import DATA_DIR, ITALIAN_CITIES, get_city_restaurants
+from ristoaudit.city_restaurants import (
+    DATA_DIR,
+    ITALIAN_CITIES,
+    get_city_restaurants,
+    update_restaurant_in_city_cache,
+)
 from ristoaudit.models import AuditInput
 from ristoaudit.pdf_report import generate_pdf_report
 from ristoaudit.scoring import run_full_audit
@@ -306,6 +311,22 @@ class RistoAuditHandler(BaseHTTPRequestHandler):
             return
 
         parsed = urllib.parse.urlsplit(self.path)
+        if parsed.path == "/api/restaurants/update":
+            content_length = int(self.headers.get("Content-Length", "0"))
+            raw_body = self.rfile.read(content_length).decode("utf-8", errors="replace")
+            try:
+                body = json.loads(raw_body)
+            except Exception:
+                self._send_json({"updated": False, "error": "JSON non valido"}, status=400)
+                return
+            res = update_restaurant_in_city_cache(
+                city=str(body.get("city") or ""),
+                updates=body,
+                overwrite_empty=True,
+            )
+            self._send_json(res)
+            return
+
         if parsed.path != "/audit":
             self.send_error(HTTPStatus.NOT_FOUND, "Endpoint non trovato")
             return
@@ -379,6 +400,28 @@ class RistoAuditHandler(BaseHTTPRequestHandler):
             run_ominis_search=_form_bool(params, "run_ominis_search", default=True),
             run_ominis_username=_form_bool(params, "run_ominis_username", default=True),
             deep_link_check=_form_bool(params, "deep_link_check", default=True),
+        )
+
+        # Salva automaticamente eventuali campi compilati manualmente nel JSON/CSV della citta'
+        update_restaurant_in_city_cache(
+            city=city,
+            updates={
+                "restaurant_name": restaurant_name,
+                "google_place_id": explicit_pid,
+                "google_maps_url": maps_or_pid,
+                "address": audit_input.address,
+                "cuisine_type": audit_input.cuisine_type,
+                "website_url": audit_input.website_url,
+                "menu_url": audit_input.menu_url,
+                "instagram_url": audit_input.instagram_url,
+                "facebook_url": audit_input.facebook_url,
+                "tiktok_url": audit_input.tiktok_url,
+                "social_handle": audit_input.social_handle,
+                "tripadvisor_url": audit_input.tripadvisor_url,
+                "thefork_url": audit_input.thefork_url,
+                "reviews_notes": audit_input.reviews_notes,
+            },
+            overwrite_empty=False,
         )
 
         job_id = uuid.uuid4().hex[:12]
