@@ -433,7 +433,7 @@ def fetch_google_places_data(
     details_fields = (
         "id,displayName,formattedAddress,nationalPhoneNumber,rating,userRatingCount,"
         "googleMapsUri,websiteUri,regularOpeningHours,photos,editorialSummary,"
-        "businessStatus,priceLevel,reservable,dineIn,takeout,delivery,reviews"
+        "businessStatus,priceLevel,reservable,dineIn,takeout,delivery,reviews,location"
     )
 
     place_obj: dict[str, Any] = {}
@@ -527,6 +527,7 @@ def fetch_google_places_data(
         "has_editorial_summary": bool((place_obj.get("editorialSummary") or {}).get("text")),
         "business_status": place_obj.get("businessStatus", ""),
         "price_level": place_obj.get("priceLevel", ""),
+        "location": place_obj.get("location"),
         "reservable": place_obj.get("reservable"),
         "dine_in": place_obj.get("dineIn"),
         "takeout": place_obj.get("takeout"),
@@ -1291,6 +1292,7 @@ def run_reputation_and_social_audit(
     google_maps_url = (
         audit_input.google_maps_url.strip()
         or gp_data.get("maps_uri", "")
+        or (f"https://www.google.com/maps/place/?q=place_id:{gp_data['place_id']}" if gp_data.get("place_id") else "")
         or next((u for u in web_review_urls if "google.com/maps" in u.lower()), "")
     )
 

@@ -701,9 +701,133 @@ def generate_pdf_report(result: AuditResult, output_dir: Path | str) -> Path:
     story.append(Spacer(1, 10))
 
     # =========================================================================
+    # ANALISI S.W.O.T.
+    # =========================================================================
+    if result.swot_analysis:
+        story.append(Paragraph("6. Analisi S.W.O.T. del Locale", s_h2))
+        story.append(Paragraph(
+            "L'analisi SWOT valuta la posizione competitiva del ristorante: cosa fanno bene i competitor, dove mostrano debolezze "
+            "e come inserirsi nelle quote di mercato disponibili del quartiere.",
+            s_small,
+        ))
+        story.append(Spacer(1, 5))
+        swot_cells = []
+        # Definizione colori box SWOT
+        swot_box_colors = {
+            "Strengths": ("#16A34A", "#F0FDF4"),
+            "Weaknesses": ("#DC2626", "#FEF2F2"),
+            "Opportunities": ("#2563EB", "#EFF6FF"),
+            "Threats": ("#D97706", "#FFFBEB"),
+        }
+        swot_items = list(result.swot_analysis.items())
+        # Costruisce griglia 2x2
+        row1, row2 = [], []
+        for i, (quadrant_title, items) in enumerate(swot_items):
+            q_key = quadrant_title.split()[0]
+            hdr_col, bg_col = swot_box_colors.get(q_key, ("#0F172A", "#F8FAFC"))
+            content = f"<b><font color='{hdr_col}'>{_esc(quadrant_title)}</font></b><br/>"
+            for item in items:
+                content += f"&bull; {_esc(item)}<br/>"
+            p = Paragraph(content, s_small)
+            if i < 2:
+                row1.append(p)
+            else:
+                row2.append(p)
+        
+        if row1:
+            swot_tbl = Table([row1, row2], colWidths=[usable_w * 0.50, usable_w * 0.50])
+            swot_tbl.setStyle(TableStyle([
+                ("GRID", (0, 0), (-1, -1), 0.5, BORDER),
+                ("BACKGROUND", (0, 0), (0, 0), colors.HexColor("#F0FDF4")),
+                ("BACKGROUND", (1, 0), (1, 0), colors.HexColor("#FEF2F2")),
+                ("BACKGROUND", (0, 1), (0, 1), colors.HexColor("#EFF6FF")),
+                ("BACKGROUND", (1, 1), (1, 1), colors.HexColor("#FFFBEB")),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                ("TOPPADDING", (0, 0), (-1, -1), 6),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+            ]))
+            story.append(swot_tbl)
+            story.append(Spacer(1, 10))
+
+    # =========================================================================
+    # ISOCRONA & ANALISI QUOTA DI MERCATO COMPETITOR
+    # =========================================================================
+    if result.market_analysis and result.market_analysis.get("competitors"):
+        ma = result.market_analysis
+        story.append(Paragraph("7. Analisi Isocrona & Quota di Mercato Competitor (QM)", s_h2))
+        iso_min = ma.get("isochrone_minutes", 10)
+        pop_target = ma.get("target_clients", 9000)
+        occ_qm = ma.get("total_occupied_market_share_pct", 0)
+        free_qm = ma.get("available_market_share_pct", 0)
+
+        intro_mkt = (
+            f"<b>Bacino Isocrona {iso_min} minuti (in auto):</b> raggio stimato ~{ma.get('reach_radius_km', 3.5)} km • "
+            f"Clienti in target stimati: <b>{pop_target:,}</b> (su bacino di {ma.get('estimated_population', 50000):,} ab.)<br/>"
+            f"<b>Quota Mercato Totale Occupata dai competitor mappati:</b> <b>{occ_qm}%</b>  •  "
+            f"<b>Quota Mercato Libera/Disponibile:</b> <font color='#16A34A'><b>{free_qm}%</b></font>"
+        )
+        story.append(Paragraph(intro_mkt, s_body))
+        story.append(Spacer(1, 5))
+
+        mkt_rows = [[
+            Paragraph("Competitor nell'Isocrona", s_th),
+            Paragraph("Rating Google", s_th),
+            Paragraph("Stima Pax / Giorno", s_th),
+            Paragraph("Pax Mensili", s_th),
+            Paragraph("Quota Mercato (QM)", s_th),
+        ]]
+
+        for c in ma["competitors"]:
+            mkt_rows.append([
+                Paragraph(f"<b>{_esc(c['name'])}</b>", s_small),
+                Paragraph(f"{c.get('rating') or 'N/D'}/5 ({c.get('reviews_count', 0)})", s_small),
+                Paragraph(f"{c['est_daily_pax']} pax", s_small),
+                Paragraph(f"{c['est_monthly_pax']:,}", s_small),
+                Paragraph(f"<b>{c['market_share_pct']}%</b>", ParagraphStyle("QMPct", parent=s_cell_b, textColor=NAVY, alignment=TA_CENTER)),
+            ])
+
+        tgt = ma.get("target_restaurant", {})
+        if tgt:
+            mkt_rows.append([
+                Paragraph(f"<b>{_esc(tgt.get('name') or 'Vostro Locale')} (Target)</b>", ParagraphStyle("TgtName", parent=s_small, textColor=colors.HexColor("#C2410C"))),
+                Paragraph("—", s_small),
+                Paragraph(f"{tgt.get('est_daily_pax', 70)} pax", s_small),
+                Paragraph(f"{tgt.get('est_monthly_pax', 2100):,}", s_small),
+                Paragraph(f"<b>{tgt.get('potential_market_share_pct', 0)}% (Potenziale)</b>", ParagraphStyle("TgtQM", parent=s_cell_b, textColor=colors.HexColor("#C2410C"), alignment=TA_CENTER)),
+            ])
+
+        mkt_tbl = Table(mkt_rows, colWidths=[usable_w * 0.36, usable_w * 0.16, usable_w * 0.16, usable_w * 0.14, usable_w * 0.18])
+        mkt_tbl.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), NAVY),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.white, LIGHT_BG]),
+            ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#FFF7ED")),
+            ("GRID", (0, 0), (-1, -1), 0.4, BORDER),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 5),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ]))
+        story.append(mkt_tbl)
+        story.append(Spacer(1, 4))
+        story.append(Paragraph(
+            "<font color='#64748B' size='7'><b>Formula Quota Mercato:</b> QM = (Stima pax mensili / Clienti in target) &times; 100. "
+            "Aiuta a comprendere le crepe e la torta già suddivisa nel quartiere per posizionare l'offerta gastronomica.</font>",
+            s_small
+        ))
+        story.append(Spacer(1, 10))
+
+    # =========================================================================
     # PIANO D'AZIONE 7 / 30 / 90 GIORNI
     # =========================================================================
-    story.append(Paragraph("6. Piano d'Azione Consigliato per il Ristorante", s_h2))
+    sec_count = 6
+    if result.swot_analysis:
+        sec_count += 1
+    if result.market_analysis and result.market_analysis.get("competitors"):
+        sec_count += 1
+    story.append(Paragraph(f"{sec_count}. Piano d'Azione Consigliato per il Ristorante", s_h2))
     for phase, actions in result.action_plan.items():
         story.append(Paragraph(f"<b>{_esc(phase)}</b>", s_bold))
         for act in actions:

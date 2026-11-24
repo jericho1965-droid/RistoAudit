@@ -62,6 +62,7 @@ def _load_saved_settings() -> dict[str, str]:
         "google_places_api_key": os.environ.get("GOOGLE_PLACES_API_KEY") or os.environ.get("google_places_api_key", ""),
         "tripadvisor_terra_api_key": os.environ.get("TRIPADVISOR_TERRA_API_KEY") or os.environ.get("tripadvisor_terra_api_key", ""),
         "brightdata_api_key": os.environ.get("BRIGHTDATA_API_KEY") or os.environ.get("brightdata_api_key", ""),
+        "openrouteservice_api_key": os.environ.get("OPENROUTESERVICE_API_KEY") or os.environ.get("openrouteservice_api_key", ""),
         "consultant_name": os.environ.get("CONSULTANT_NAME") or os.environ.get("consultant_name") or "RistoAudit",
         "consultant_contact": os.environ.get("CONSULTANT_CONTACT") or os.environ.get("consultant_contact", ""),
     }
@@ -336,6 +337,7 @@ class RistoAuditHandler(BaseHTTPRequestHandler):
             google_places_api_key=api_key,
             tripadvisor_terra_api_key=ta_api_key,
             brightdata_api_key=bd_api_key,
+            openrouteservice_api_key=saved.get("openrouteservice_api_key", ""),
             run_ominis_search=_form_bool(params, "run_ominis_search", default=True),
             run_ominis_username=_form_bool(params, "run_ominis_username", default=True),
             deep_link_check=_form_bool(params, "deep_link_check", default=True),

@@ -43,6 +43,7 @@ class AuditInput:
     google_places_api_key: str = ""
     tripadvisor_terra_api_key: str = ""
     brightdata_api_key: str = ""
+    openrouteservice_api_key: str = ""
 
     # Opzioni OSINT
     run_ominis_search: bool = True
@@ -91,5 +92,7 @@ class AuditResult:
     osint_data: dict[str, Any] = field(default_factory=dict)
 
     action_plan: dict[str, list[str]] = field(default_factory=dict)
+    swot_analysis: dict[str, list[str]] = field(default_factory=dict)
+    market_analysis: dict[str, Any] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
 

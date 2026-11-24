@@ -7,6 +7,11 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 
 from .models import AuditInput, AuditResult, CategoryScore, Finding
+from .competitor_analysis import (
+    calculate_market_share,
+    fetch_nearby_competitors,
+    fetch_ors_isochrone,
+)
 from .ominis_bridge import run_ominis_recon
 from .reputation_audit import (
     fetch_google_maps_brightdata_reviews,
@@ -704,6 +709,27 @@ def run_full_audit(audit_input: AuditInput) -> AuditResult:
             recommendation="Rivendicare e ottimizzare al 100% la scheda Google Business Profile (categorie, orari, foto, link sito e menù).",
         ))
 
+    if unanswered is not None and unanswered > 0:
+        rev_score -= min(25, 10 + (10 if unanswered >= 10 else unanswered))
+        findings.append(Finding(
+            category="reviews",
+            severity="CRITICO" if unanswered >= 5 else "ALTO",
+            title=f"Mancata risposta alle recensioni online ({unanswered} recensioni senza replica)",
+            description=(
+                f"Tra le recensioni pubbliche analizzate risultano ben {unanswered} recensioni a cui la direzione non ha dato riscontro. "
+                "Ogni recensione lasciata senza risposta rappresenta una grave criticità: rispondere a una recensione positiva consolida "
+                "la fedeltà del cliente soddisfatto stimolando il ritorno, mentre rispondere a una critica permette di recuperare "
+                "un cliente insoddisfatto prima che sia perso per sempre."
+            ),
+            business_impact=(
+                "Lasciare recensioni senza risposta comunica disinteresse e scarsa attenzione all'esperienza del cliente: "
+                "oltre l'80% dei potenziali clienti legge le risposte del proprietario prima di scegliere dove mangiare. "
+                "Rispondere a una recensione positiva fidelizza e crea ambasciatori del locale; rispondere a una critica argina danni di reputazione "
+                "e converte un'insoddisfazione in un'opportunità di riscatto."
+            ),
+            recommendation="Introdurre una routine settimanale per replicare puntualmente a tutte le recensioni: ringraziare calorosamente chi lascia un giudizio positivo e affrontare con massima cura, empatia e trasparenza ogni critica.",
+        ))
+
     if unanswered_neg is not None and unanswered_neg > 0:
         rev_score -= min(35, 15 + unanswered_neg * 4)
         findings.append(Finding(
@@ -717,43 +743,6 @@ def run_full_audit(audit_input: AuditInput) -> AuditResult:
                 "Lasciare una recensione negativa senza risposta equivale a confermare la critica davanti a centinaia di futuri clienti ogni mese."
             ),
             recommendation="Rispondere entro 48 ore a tutte le recensioni negative con tono empatico, professionale e orientato alla soluzione (mai difensivo), invitando il cliente a tornare per una nuova esperienza.",
-        ))
-    elif reviews_data.get("low_rating_google_reviews_count", 0) > 0:
-        low_n = reviews_data["low_rating_google_reviews_count"]
-        neg_n = reviews_data.get("negative_reviews_count", 0)
-        themes = reviews_data.get("complaint_themes") or []
-        themes_str = f" Temi critici emersi nei testi: {', '.join(themes)}." if themes else ""
-        rev_score -= min(22, 8 + low_n * 4)
-        findings.append(Finding(
-            category="reviews",
-            severity="CRITICO" if neg_n >= 2 else "ALTO",
-            title=f"Rilevate {low_n} recensioni critiche/negative in evidenza su Google",
-            description=(
-                f"Tra le principali recensioni pubbliche mostrate da Google compaiono {neg_n} recensioni negative (1-2 stelle) "
-                f"e {reviews_data.get('neutral_reviews_count', 0)} neutre (3 stelle).{themes_str}"
-            ),
-            business_impact=(
-                "Rispondere a una recensione negativa significa provare a recuperare un cliente che altrimenti andrebbe perso per sempre "
-                "e rassicurare chi sta valutando se prenotare un tavolo. Senza risposte curate e un flusso costante di nuove recensioni positive, "
-                "queste critiche frenano direttamente il numero di coperti settimanali."
-            ),
-            recommendation="Replicare pubblicamente a ogni recensione critica con cortesia e intervenire operativamente sui temi segnalati dai clienti.",
-            evidence=", ".join(themes) if themes else "",
-        ))
-
-    if unanswered is not None and unanswered > 0:
-        rev_score -= min(25, 10 + (10 if unanswered >= 10 else unanswered))
-        findings.append(Finding(
-            category="reviews",
-            severity="ALTO",
-            title=f"{unanswered} recensioni Google prive di risposta dal ristorante",
-            description=f"Tra le recensioni Google analizzate risultano {unanswered} recensioni senza alcun riscontro da parte del titolare.",
-            business_impact=(
-                "Non rispondere alle recensioni è una doppia occasione persa: rispondere a una recensione positiva significa fidelizzare "
-                "un cliente soddisfatto che probabilmente tornerà (e parlerà bene del locale), mentre rispondere a una negativa significa "
-                "cercare di recuperare un cliente che altrimenti andrebbe perso per sempre. Inoltre Google premia nel ranking locale le attività che rispondono."
-            ),
-            recommendation="Attivare una gestione settimanale strutturata per rispondere al 100% delle recensioni: ringraziare per nome chi lascia un giudizio positivo e gestire con empatia ogni critica.",
         ))
 
     if g_rating is not None and g_rating < 4.2:
@@ -1074,6 +1063,85 @@ def run_full_audit(audit_input: AuditInput) -> AuditResult:
     if not long_term:
         long_term = ["Monitorare trimestralmente la reputazione online e introdurre campagne locali stagionali."]
 
+    # =========================================================================
+    # ANALISI ISOCRONA & COMPETITOR (OpenRouteService + Google Places)
+    # =========================================================================
+    market_analysis: dict[str, Any] = {}
+    lat = None
+    lng = None
+    if gp_data and gp_data.get("location"):
+        lat = gp_data["location"].get("latitude")
+        lng = gp_data["location"].get("longitude")
+
+    if lat and lng:
+        ors_info = fetch_ors_isochrone(
+            lat=lat,
+            lng=lng,
+            api_key=audit_input.openrouteservice_api_key.strip(),
+            minutes=10,
+        )
+        competitors = fetch_nearby_competitors(
+            restaurant_name=audit_input.restaurant_name,
+            city=audit_input.city,
+            cuisine_type=audit_input.cuisine_type,
+            lat=lat,
+            lng=lng,
+            google_places_api_key=audit_input.google_places_api_key.strip(),
+            radius_meters=int(ors_info.get("reach_radius_km", 3.5) * 1000) if ors_info else 2000,
+            max_competitors=5,
+        )
+        market_analysis = calculate_market_share(
+            isochrone_info=ors_info,
+            competitors=competitors,
+            target_restaurant_name=audit_input.restaurant_name,
+            target_reviews_count=reviews_data.get("google_reviews_count"),
+            estimated_population=50000,
+        )
+
+    # Costruzione Analisi S.W.O.T. basata sui dati raccolti e il contesto competitivo
+    swot_strengths = [s.title for s in strengths[:4]]
+    if not swot_strengths:
+        swot_strengths = ["Identità di cucina e offerta gastronomica radicata nel territorio."]
+
+    swot_weaknesses = [f.title for f in findings if f.severity in ("CRITICO", "ALTO")][:4]
+    if not swot_weaknesses:
+        swot_weaknesses = ["Margine di miglioramento nella tempestività di risposta e copertura recensioni."]
+
+    swot_opportunities = []
+    if market_analysis.get("available_market_share_pct"):
+        swot_opportunities.append(
+            f"Quota di Mercato libera del {market_analysis['available_market_share_pct']}% nell'isocrona di 10 min: "
+            "spazio per attrarre nuovi clienti con posizionamento locale mirato."
+        )
+    if any(f.category == "reviews" for f in findings):
+        swot_opportunities.append("Intercettare la clientela delusa dai competitor rispondendo al 100% delle recensioni con cura ed empatia.")
+    if any(f.category in ("website", "menu") for f in findings):
+        swot_opportunities.append("Offrire un menù digitale rapido e prenotazioni dirette dal sito web per evitare commissioni e attrarre turisti.")
+    if any(f.category == "social" for f in findings):
+        swot_opportunities.append("Sfruttare la discontinuità social dei locali vicini con un piano editoriale costante su piatti signature e dietro le quinte.")
+    if not swot_opportunities:
+        swot_opportunities.append("Valorizzare i piatti signature sui canali digitali per differenziarsi dai competitor dell'area.")
+    swot_opportunities = swot_opportunities[:4]
+
+    swot_threats = []
+    if market_analysis.get("competitors"):
+        top_comp = market_analysis["competitors"][0]
+        swot_threats.append(
+            f"Forte presenza di competitor storici nell'isocrona (es. {top_comp['name']} con QM potenziale stimata al {top_comp['market_share_pct']}%)."
+        )
+    swot_threats.extend([
+        "Competitor diretti di zona con strategie attive su Google Maps e posizionamento sponsorizzato.",
+        "Aumento delle aspettative dei clienti su rapidità di prenotazione online e trasparenza dei prezzi prima di arrivare al locale.",
+    ])
+    swot_threats = swot_threats[:3]
+
+    swot_analysis = {
+        "Strengths (Punti di Forza)": swot_strengths,
+        "Weaknesses (Debolezze)": swot_weaknesses,
+        "Opportunities (Opportunità di Mercato)": swot_opportunities,
+        "Threats (Minacce e Competitor)": swot_threats,
+    }
+
     return AuditResult(
         audit_id=audit_id,
         input_data=asdict(audit_input),
@@ -1093,5 +1161,7 @@ def run_full_audit(audit_input: AuditInput) -> AuditResult:
             "Ottimizzazione Operativa (Entro 30 giorni)": medium_term,
             "Crescita & Consolidamento (Entro 90 giorni)": long_term,
         },
+        swot_analysis=swot_analysis,
+        market_analysis=market_analysis,
         warnings=warnings,
     )
