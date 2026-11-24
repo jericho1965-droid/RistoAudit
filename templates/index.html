@@ -301,78 +301,11 @@
         </div>
       </section>
 
-      <!-- FIRMA REPORT (SALVABILE IN LOCALE) -->
+      <!-- INTEGRAZIONI MANUALI OPZIONALI (SEMPRE VISIBILI) -->
       <section class="card">
-        <h2>2. Firma e Contatti sul Report PDF</h2>
-        <p class="sub">Questi dati compaiono in intestazione e nell'invito finale al contatto.</p>
-        {% if saved.google_places_api_key %}
-        <div class="api-status api-ok">✓ Google Places attiva</div>
-        {% else %}
-        <div class="api-status api-off">⚠ Google Places API Key non configurata</div>
-        {% endif %}
-        {% if saved.tripadvisor_terra_api_key %}
-        <div class="api-status api-ok">✓ TripAdvisor Terra attiva</div>
-        {% endif %}
-        {% if saved.brightdata_api_key %}
-        <div class="api-status api-ok">✓ Recensioni Facebook attive</div>
-        {% endif %}
+        <h2>2. Integrazioni Opzionali</h2>
+        <p class="sub">Compila solo se vuoi aggiungere link social non presenti sul sito o indicare URL specifici (tutti i campi sono facoltativi).</p>
         <div class="grid">
-          <div>
-            <label for="consultant_name">Nome Agenzia / Consulente</label>
-            <input type="text" id="consultant_name" name="consultant_name" value="{{ saved.consultant_name }}" placeholder="RistoAudit">
-          </div>
-          <div>
-            <label for="consultant_contact">Contatto (email / telefono nel PDF)</label>
-            <input type="text" id="consultant_contact" name="consultant_contact" value="{{ saved.consultant_contact }}" placeholder="es. info@ristoaudit.it | +39 333 1234567">
-          </div>
-        </div>
-        <label class="check-inline">
-          <input type="checkbox" name="remember_settings" value="1" checked>
-          Ricorda questi dati in locale per i prossimi report
-        </label>
-      </section>
-
-      <!-- CAMPI OPZIONALI AVANZATI (CHIUSI DI DEFAULT) -->
-      <details class="advanced">
-        <summary>+ Integrazioni manuali opzionali (social, sito/menù, recensioni senza risposta, API Key)</summary>
-        <p class="sub" style="margin-bottom:14px;">Usa questi campi solo se vuoi aggiungere link social non presenti sul sito, forzare un URL specifico o aggiornare la chiave Google Places.</p>
-        <div class="grid">
-          <div>
-            <label for="google_places_api_key">Google Places API Key (solo per configurarla o cambiarla)</label>
-            <input type="password" id="google_places_api_key" name="google_places_api_key" value="{{ saved.google_places_api_key }}" placeholder="AIza...">
-          </div>
-          <div>
-            <label for="tripadvisor_terra_api_key">TripAdvisor Terra API Key (opzionale)</label>
-            <input type="password" id="tripadvisor_terra_api_key" name="tripadvisor_terra_api_key" value="{{ saved.tripadvisor_terra_api_key }}" placeholder="Chiave Terra API...">
-          </div>
-          <div class="full">
-            <label for="brightdata_api_key">Bright Data API Key per Recensioni Facebook (opzionale)</label>
-            <input type="password" id="brightdata_api_key" name="brightdata_api_key" value="{{ saved.brightdata_api_key }}" placeholder="Bearer API key...">
-          </div>
-          <div>
-            <label for="unanswered_reviews_count">Recensioni senza risposta (stima manuale)</label>
-            <input type="number" id="unanswered_reviews_count" name="unanswered_reviews_count" min="0" placeholder="es. 25">
-          </div>
-          <div>
-            <label for="unanswered_negative_reviews">Di cui negative senza risposta</label>
-            <input type="number" id="unanswered_negative_reviews" name="unanswered_negative_reviews" min="0" placeholder="es. 6">
-          </div>
-          <div>
-            <label for="website_url">URL Sito Web (solo se diverso da Google)</label>
-            <input type="url" id="website_url" name="website_url" placeholder="https://www.esempio.it">
-          </div>
-          <div>
-            <label for="menu_url">URL diretto Menù HTML/PDF</label>
-            <input type="url" id="menu_url" name="menu_url" placeholder="https://.../menu.pdf">
-          </div>
-          <div>
-            <label for="last_social_post_date">Data ultimo post social (se nota)</label>
-            <input type="date" id="last_social_post_date" name="last_social_post_date">
-          </div>
-          <div>
-            <label for="social_handle">Handle / Nome profilo social principale</label>
-            <input type="text" id="social_handle" name="social_handle" placeholder="es. osteriadelborgo (senza @)">
-          </div>
           <div>
             <label for="instagram_url">URL Instagram</label>
             <input type="url" id="instagram_url" name="instagram_url" placeholder="https://www.instagram.com/...">
@@ -386,11 +319,23 @@
             <input type="url" id="tiktok_url" name="tiktok_url" placeholder="https://www.tiktok.com/@...">
           </div>
           <div>
-            <label for="tripadvisor_url">URL TripAdvisor (opzionale)</label>
+            <label for="social_handle">Handle / Nome profilo social principale</label>
+            <input type="text" id="social_handle" name="social_handle" placeholder="es. osteriadelborgo (senza @)">
+          </div>
+          <div>
+            <label for="website_url">URL Sito Web (solo se diverso da Google)</label>
+            <input type="url" id="website_url" name="website_url" placeholder="https://www.esempio.it">
+          </div>
+          <div>
+            <label for="menu_url">URL diretto Menù HTML/PDF</label>
+            <input type="url" id="menu_url" name="menu_url" placeholder="https://.../menu.pdf">
+          </div>
+          <div>
+            <label for="tripadvisor_url">URL TripAdvisor</label>
             <input type="url" id="tripadvisor_url" name="tripadvisor_url" placeholder="https://www.tripadvisor.it/Restaurant_Review-...">
           </div>
           <div>
-            <label for="thefork_url">URL TheFork (opzionale)</label>
+            <label for="thefork_url">URL TheFork</label>
             <input type="url" id="thefork_url" name="thefork_url" placeholder="https://www.thefork.it/ristorante/...">
           </div>
           <div>
@@ -402,7 +347,7 @@
             <textarea id="reviews_notes" name="reviews_notes" rows="2" placeholder="Eventuali osservazioni extra da includere nel PDF..."></textarea>
           </div>
         </div>
-      </details>
+      </section>
 
       <input type="hidden" name="run_ominis_search" value="1">
       <input type="hidden" name="run_ominis_username" value="1">

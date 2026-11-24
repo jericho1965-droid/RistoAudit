@@ -656,11 +656,11 @@ def run_full_audit(audit_input: AuditInput) -> AuditResult:
             title=f"{unanswered_neg} recensioni negative lasciate senza alcuna risposta",
             description=f"Risultano {unanswered_neg} recensioni negative alle quali la direzione del ristorante non ha mai replicato.",
             business_impact=(
-                "L'88% dei potenziali clienti legge le recensioni negative prima di prenotare. "
-                "Lasciare una critica senza risposta equivale ad ammettere la colpa davanti a centinaia di futuri clienti ogni mese, "
-                "bruciando prenotazioni ad alto margine."
+                "Rispondere a una recensione negativa significa cercare di recuperare un cliente che altrimenti andrebbe perso per sempre "
+                "e dimostrare agli oltre 8 clienti su 10 che leggono le critiche prima di prenotare che la direzione ascolta e sa risolvere i problemi. "
+                "Lasciare una recensione negativa senza risposta equivale a confermare la critica davanti a centinaia di futuri clienti ogni mese."
             ),
-            recommendation="Rispondere entro 48 ore a tutte le recensioni negative con tono empatico, professionale e orientato alla soluzione (mai difensivo).",
+            recommendation="Rispondere entro 48 ore a tutte le recensioni negative con tono empatico, professionale e orientato alla soluzione (mai difensivo), invitando il cliente a tornare per una nuova esperienza.",
         ))
     elif reviews_data.get("low_rating_google_reviews_count", 0) > 0:
         low_n = reviews_data["low_rating_google_reviews_count"]
@@ -677,8 +677,9 @@ def run_full_audit(audit_input: AuditInput) -> AuditResult:
                 f"e {reviews_data.get('neutral_reviews_count', 0)} neutre (3 stelle).{themes_str}"
             ),
             business_impact=(
-                "Queste recensioni sono le prime che compaiono a chi cerca il locale su Google Maps: senza risposte professionali e senza "
-                "un flusso costante di nuove recensioni positive, frenano direttamente il numero di coperti settimanali."
+                "Rispondere a una recensione negativa significa provare a recuperare un cliente che altrimenti andrebbe perso per sempre "
+                "e rassicurare chi sta valutando se prenotare un tavolo. Senza risposte curate e un flusso costante di nuove recensioni positive, "
+                "queste critiche frenano direttamente il numero di coperti settimanali."
             ),
             recommendation="Replicare pubblicamente a ogni recensione critica con cortesia e intervenire operativamente sui temi segnalati dai clienti.",
             evidence=", ".join(themes) if themes else "",
@@ -689,13 +690,14 @@ def run_full_audit(audit_input: AuditInput) -> AuditResult:
         findings.append(Finding(
             category="reviews",
             severity="ALTO",
-            title=f"{unanswered} recensioni totali prive di risposta dal ristorante",
-            description=f"Risultano circa {unanswered} recensioni ricevute senza alcun riscontro da parte del titolare.",
+            title=f"{unanswered} recensioni Google prive di risposta dal ristorante",
+            description=f"Tra le recensioni Google analizzate risultano {unanswered} recensioni senza alcun riscontro da parte del titolare.",
             business_impact=(
-                "Google conferma ufficialmente che rispondere alle recensioni migliora il posizionamento locale su Maps. "
-                "Ignorare i clienti che dedicano tempo a scrivere una recensione riduce sia la visibilità sia il ritorno in sala."
+                "Non rispondere alle recensioni è una doppia occasione persa: rispondere a una recensione positiva significa fidelizzare "
+                "un cliente soddisfatto che probabilmente tornerà (e parlerà bene del locale), mentre rispondere a una negativa significa "
+                "cercare di recuperare un cliente che altrimenti andrebbe perso per sempre. Inoltre Google premia nel ranking locale le attività che rispondono."
             ),
-            recommendation="Attivare una gestione settimanale strutturata per rispondere al 100% delle recensioni (positive e negative).",
+            recommendation="Attivare una gestione settimanale strutturata per rispondere al 100% delle recensioni: ringraziare per nome chi lascia un giudizio positivo e gestire con empatia ogni critica.",
         ))
 
     if g_rating is not None and g_rating < 4.2:
@@ -756,8 +758,8 @@ def run_full_audit(audit_input: AuditInput) -> AuditResult:
                 title=f"Recensioni Facebook senza risposta dalla pagina ({fb_unans} su {len(fb_revs)} recenti)",
                 description=f"Tra le ultime {len(fb_revs)} recensioni pubblicate su Facebook, {fb_unans} non mostrano una risposta o interazione da parte del ristorante.",
                 business_impact=(
-                    "Su Facebook ogni risposta della pagina genera una notifica al cliente e aumenta la visibilità organica del ristorante "
-                    "nel feed degli amici di chi ha recensito: non rispondere significa perdere passaparola locale gratuito."
+                    "Rispondere a una recensione positiva significa fidelizzare un cliente che probabilmente tornerà e generare passaparola "
+                    "nel feed dei suoi amici su Facebook; rispondere a una negativa significa invece cercare di recuperare un cliente che altrimenti andrebbe perso per sempre."
                 ),
                 recommendation="Rispondere regolarmente anche alle recensioni su Facebook (ringraziando per nome chi consiglia il locale e gestendo con empatia eventuali segnalazioni).",
             ))
@@ -794,7 +796,11 @@ def run_full_audit(audit_input: AuditInput) -> AuditResult:
                 severity="ALTO",
                 title=f"{ta_unans} recensioni recenti su TripAdvisor prive di risposta della direzione",
                 description=f"Tra le ultime {len(reviews_data.get('tripadvisor_reviews') or [])} recensioni pubblicate su TripAdvisor, {ta_unans} non hanno ricevuto risposta dal ristorante.",
-                business_impact="Le risposte del proprietario su TripAdvisor aumentano la fiducia dei viaggiatori e segnalano attenzione verso il cliente.",
+                business_impact=(
+                    "Rispondere a una recensione positiva fidelizza un cliente soddisfatto che probabilmente tornerà o consiglierà il ristorante, "
+                    "mentre rispondere a una recensione negativa permette di cercare di recuperare un cliente che altrimenti andrebbe perso per sempre "
+                    "e dimostra cura e professionalità ai nuovi viaggiatori su TripAdvisor."
+                ),
                 recommendation="Impostare una risposta personalizzata per tutte le nuove recensioni su TripAdvisor entro 48-72 ore.",
             ))
 
