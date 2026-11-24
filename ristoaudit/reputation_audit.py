@@ -651,8 +651,8 @@ def fetch_google_maps_brightdata_reviews(
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
     }
-    # days_limit=30 rende lo snapshot molto piu' rapido sui ristoranti con centinaia di recensioni
-    payload = [{"url": url, "days_limit": 30}]
+    # days_limit=90 copre gli ultimi 3 mesi; limit_per_input=15 ferma lo scraper a 15 recensioni
+    payload = [{"url": url, "days_limit": 90}]
 
     rows: list[dict[str, Any]] = []
     polls = max(5, int(max_wait_seconds // 4))
@@ -661,6 +661,7 @@ def fetch_google_maps_brightdata_reviews(
             resp = client.post(trigger_url, headers=headers, json=payload)
             if resp.status_code in (200, 202):
                 snap = resp.json().get("snapshot_id")
+                print(f"[RistoAudit] Bright Data Google trigger OK: snap={snap} url={url[:80]}")
                 if snap:
                     snap_url = f"https://api.brightdata.com/datasets/v3/snapshot/{snap}?format=json"
                     for _ in range(polls):
@@ -737,7 +738,11 @@ def fetch_google_maps_brightdata_reviews(
         })
 
     if not reviews:
+        if rows:
+            print(f"[RistoAudit] Bright Data Google: {len(rows)} righe ma 0 recensioni valide. Sample: {str(rows[0])[:220]}")
         return {}
+
+    print(f"[RistoAudit] Bright Data Google OK: {len(reviews)} recensioni (senza risposta: {sum(1 for r in reviews if not r['has_owner_reply'])})")
 
     pos_c = sum(1 for r in reviews if r["sentiment"] == "positiva")
     neu_c = sum(1 for r in reviews if r["sentiment"] == "neutra")
@@ -873,7 +878,11 @@ def fetch_facebook_brightdata_reviews(
         })
 
     if not reviews:
+        if rows:
+            print(f"[RistoAudit] Bright Data Facebook: {len(rows)} righe ma 0 recensioni valide. Sample: {str(rows[0])[:220]}")
         return {}
+
+    print(f"[RistoAudit] Bright Data Facebook OK: {len(reviews)} recensioni")
 
     rec_yes = sum(1 for r in reviews if r["recommends"] is True)
     rec_no = sum(1 for r in reviews if r["recommends"] is False)
