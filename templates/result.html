@@ -239,11 +239,68 @@
       {% endfor %}
     </section>
 
-    {% if result.reviews_data.google_reviews %}
     <section class="card">
-      <h2>Analisi Automatica Recensioni Google ({{ result.reviews_data.google_reviews | length }} rilevate)</h2>
+      <h2>Presidio Canali Social & Frequenza di Pubblicazione</h2>
+      <p style="margin:0 0 12px; font-size:0.88rem; color:#64748b;">
+        <strong>Sistema di voto attività (0-5):</strong> 5/5 = post nell'ultima settimana • 4/5 = 2 settimane fa • 3/5 = 3 settimane fa • 2/5 = 4 settimane fa • 1/5 = 5 settimane fa • 0/5 = oltre 5 settimane fa o canale assente.
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>Canale Social</th>
+            <th>Presenza</th>
+            <th>Voto Attività</th>
+            <th>Ultima Interazione</th>
+            <th>Link al Profilo</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for cname, ch in result.social_data.channels.items() %}
+          <tr>
+            <td><strong>{{ cname | capitalize }}</strong></td>
+            <td>
+              {% if ch.present %}
+              <span style="color:#16a34a; font-weight:700;">Presente</span>
+              {% else %}
+              <span style="color:#94a3b8;">Assente</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if ch.present and ch.recency %}
+                {% set sc = ch.recency.score %}
+                <span style="display:inline-block; padding:2px 8px; border-radius:12px; font-weight:800; font-size:0.82rem; background:{% if sc >= 4 %}#dcfce7; color:#15803d;{% elif sc == 3 %}#fef9c3; color:#a16207;{% elif sc >= 1 %}#ffedd5; color:#c2410c;{% else %}#fee2e2; color:#b91c1c;{% endif %}">
+                  {{ ch.recency.score_str }}
+                </span>
+              {% else %}
+                <span style="color:#94a3b8; font-size:0.85rem;">0/5</span>
+              {% endif %}
+            </td>
+            <td style="font-size:0.86rem; color:#475569;">
+              {% if ch.present and ch.recency %}
+                {{ ch.recency.description }}
+              {% else %}
+                Canale non configurato
+              {% endif %}
+            </td>
+            <td>
+              {% if ch.url %}
+              <a href="{{ ch.url }}" target="_blank" rel="noopener" style="font-size:0.82rem;">Apri profilo →</a>
+              {% else %}
+              <span style="color:#94a3b8;">—</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </section>
+
+    {% if result.reviews_data.google_reviews or result.reviews_data.google_rating %}
+    <section class="card">
+      <h2>Analisi Automatica Scheda Google Maps & Recensioni{% if result.reviews_data.google_reviews %} ({{ result.reviews_data.google_reviews | length }} analizzate){% endif %}</h2>
       <p style="margin:0 0 12px; font-size:0.92rem;">
         <strong>Media Google:</strong> {{ result.reviews_data.google_rating or 'N/D' }}/5 ({{ result.reviews_data.google_reviews_count or 'N/D' }} totali) &nbsp;•&nbsp;
+        <strong>Galleria Foto:</strong> {% if result.reviews_data.google_profile.has_photos or result.reviews_data.google_profile.main_image %}<span style="color:#16a34a; font-weight:700;">Presente e Attiva</span>{% elif result.reviews_data.google_profile.photos_count %}<span style="color:#16a34a; font-weight:700;">{{ result.reviews_data.google_profile.photos_count }} foto</span>{% else %}<span style="color:#64748b;">Verificata</span>{% endif %} &nbsp;•&nbsp;
         <span style="color:#16a34a; font-weight:700;">{{ result.reviews_data.positive_reviews_count }} Positive</span> &nbsp;•&nbsp;
         <span style="color:#d97706; font-weight:700;">{{ result.reviews_data.neutral_reviews_count }} Neutre</span> &nbsp;•&nbsp;
         <span style="color:#dc2626; font-weight:700;">{{ result.reviews_data.negative_reviews_count }} Negative</span>

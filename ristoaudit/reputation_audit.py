@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import ssl
 import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
@@ -22,6 +23,13 @@ import certifi
 import httpx
 
 from .models import AuditInput
+
+
+def _get_ssl_verify():
+    try:
+        return ssl.create_default_context()
+    except Exception:
+        return certifi.where()
 
 _PLACE_ID_RE = re.compile(r"\b(ChIJ[A-Za-z0-9_-]{15,})\b")
 _MAPS_PLACE_NAME_RE = re.compile(r"/maps/place/([^/@]+)", re.I)
@@ -54,6 +62,171 @@ COMPLAINT_THEMES: dict[str, tuple[str, ...]] = {
         "sporco", "sporca", "pulizia", "bagno", "rumoroso", "caotico", "caldo", "dirty", "noisy",
     ),
 }
+
+_IT_EN_MONTHS = {
+    "gen": 1, "gennaio": 1, "jan": 1, "january": 1,
+    "feb": 2, "febbraio": 2, "february": 2,
+    "mar": 3, "marzo": 3, "march": 3,
+    "apr": 4, "aprile": 4, "april": 4,
+    "mag": 5, "maggio": 5, "may": 5,
+    "giu": 6, "giugno": 6, "june": 6,
+    "lug": 7, "luglio": 7, "july": 7,
+    "ago": 8, "agosto": 8, "aug": 8, "august": 8,
+    "set": 9, "settembre": 9, "sep": 9, "september": 9,
+    "ott": 10, "ottobre": 10, "oct": 10, "october": 10,
+    "nov": 11, "novembre": 11, "november": 11,
+    "dic": 12, "dicembre": 12, "dec": 12, "december": 12,
+}
+
+
+def _extract_date_from_text(text: str) -> str | None:
+    """Estrae una data YYYY-MM-DD da testi, snippet o metadati in italiano o inglese."""
+    if not text:
+        return None
+    # 1. Match ISO YYYY-MM-DD
+    m_iso = re.search(r"\b(202[0-9])-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])\b", text)
+    if m_iso:
+        return f"{m_iso.group(1)}-{m_iso.group(2)}-{m_iso.group(3)}"
+    # 2. Match DD/MM/YYYY
+    m_it = re.search(r"\b(0?[1-9]|[12][0-9]|3[01])/(0?[1-9]|1[0-2])/(202[0-9])\b", text)
+    if m_it:
+        d, m, y = m_it.group(1).zfill(2), m_it.group(2).zfill(2), m_it.group(3)
+        return f"{y}-{m}-{d}"
+    # 3. Match '12 ott 2024' o 'Sep 10, 2024'
+    month_pat = r"(?:gen|feb|mar|apr|mag|giu|lug|ago|set|ott|nov|dic|jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*"
+    m_str1 = re.search(rf"\b(0?[1-9]|[12][0-9]|3[01])\s+({month_pat})\s+(202[0-9])\b", text, re.I)
+    if m_str1:
+        d_val = m_str1.group(1).zfill(2)
+        m_name = m_str1.group(2).lower()[:3]
+        y_val = m_str1.group(3)
+        m_num = _IT_EN_MONTHS.get(m_name, 1)
+        return f"{y_val}-{str(m_num).zfill(2)}-{d_val}"
+    m_str2 = re.search(rf"\b({month_pat})\s+(0?[1-9]|[12][0-9]|3[01]),?\s+(202[0-9])\b", text, re.I)
+    if m_str2:
+        m_name = m_str2.group(1).lower()[:3]
+        d_val = m_str2.group(2).zfill(2)
+        y_val = m_str2.group(3)
+        m_num = _IT_EN_MONTHS.get(m_name, 1)
+        return f"{y_val}-{str(m_num).zfill(2)}-{d_val}"
+    return None
+
+
+def compute_social_recency_score(days_ago: int | None, present: bool) -> dict[str, Any]:
+    """Calcola il voto di attività/recency (0-5) in base al tempo passato dall'ultimo post:
+    - Ultima settimana (<= 7 gg): 5 punti su 5 (5/5)
+    - 2 settimane fa (8-14 gg): 4 punti su 5 (4/5)
+    - 3 settimane fa (15-21 gg): 3 punti su 5 (3/5)
+    - 4 settimane fa (22-28 gg): 2 punti su 5 (2/5)
+    - 5 settimane fa (29-35 gg): 1 punto su 5 (1/5)
+    - 5 settimane o più fa (>= 35 gg): 0 punti su 5 (0/5)
+    - Profilo assente: 0/5
+    """
+    if not present:
+        return {
+            "score": 0,
+            "score_str": "0/5",
+            "score_num": 0,
+            "weeks_ago": None,
+            "days_ago": None,
+            "last_date": "",
+            "label": "Assente (0/5)",
+            "status_code": "assente",
+            "is_critical": True,
+            "description": "Profilo non presente o non collegato al locale.",
+        }
+    if days_ago is None:
+        return {
+            "score": 3,
+            "score_str": "3/5",
+            "score_num": 3,
+            "weeks_ago": None,
+            "days_ago": None,
+            "last_date": "",
+            "label": "3/5 (Data specifica non pubblica)",
+            "status_code": "stimata",
+            "is_critical": False,
+            "description": "Profilo presente; timestamp dell'ultimo post non esposto pubblicamente.",
+        }
+
+    weeks = max(1, int(round(days_ago / 7)))
+    if days_ago <= 7:
+        return {
+            "score": 5,
+            "score_str": "5/5",
+            "score_num": 5,
+            "weeks_ago": 1,
+            "days_ago": days_ago,
+            "last_date": "",
+            "label": f"5/5 (Ultima settimana • {days_ago} gg fa)",
+            "status_code": "ottimo",
+            "is_critical": False,
+            "description": f"Post o interazione rilevata nell'ultima settimana ({days_ago} giorni fa).",
+        }
+    elif days_ago <= 14:
+        return {
+            "score": 4,
+            "score_str": "4/5",
+            "score_num": 4,
+            "weeks_ago": 2,
+            "days_ago": days_ago,
+            "last_date": "",
+            "label": f"4/5 (2 settimane fa • {days_ago} gg)",
+            "status_code": "buono",
+            "is_critical": False,
+            "description": f"Ultima attività rilevata 2 settimane fa ({days_ago} giorni fa).",
+        }
+    elif days_ago <= 21:
+        return {
+            "score": 3,
+            "score_str": "3/5",
+            "score_num": 3,
+            "weeks_ago": 3,
+            "days_ago": days_ago,
+            "last_date": "",
+            "label": f"3/5 (3 settimane fa • {days_ago} gg)",
+            "status_code": "moderato",
+            "is_critical": False,
+            "description": f"Ultima attività rilevata 3 settimane fa ({days_ago} giorni fa).",
+        }
+    elif days_ago <= 28:
+        return {
+            "score": 2,
+            "score_str": "2/5",
+            "score_num": 2,
+            "weeks_ago": 4,
+            "days_ago": days_ago,
+            "last_date": "",
+            "label": f"2/5 (4 settimane fa • {days_ago} gg)",
+            "status_code": "discontinuo",
+            "is_critical": True,
+            "description": f"Ultima attività rilevata 4 settimane fa ({days_ago} giorni fa).",
+        }
+    elif days_ago <= 35:
+        return {
+            "score": 1,
+            "score_str": "1/5",
+            "score_num": 1,
+            "weeks_ago": 5,
+            "days_ago": days_ago,
+            "last_date": "",
+            "label": f"1/5 (5 settimane fa • {days_ago} gg)",
+            "status_code": "critico",
+            "is_critical": True,
+            "description": f"Ultima attività rilevata 5 settimane fa ({days_ago} giorni fa).",
+        }
+    else:
+        return {
+            "score": 0,
+            "score_str": "0/5",
+            "score_num": 0,
+            "weeks_ago": weeks,
+            "days_ago": days_ago,
+            "last_date": "",
+            "label": f"0/5 (Oltre 5 settimane fa • {weeks} sett.)",
+            "status_code": "critico",
+            "is_critical": True,
+            "description": f"Profilo fermo da oltre 5 settimane ({weeks} settimane fa • {days_ago} giorni fa).",
+        }
 
 
 def _parse_int(val: str) -> int | None:
@@ -113,7 +286,7 @@ def extract_place_info_from_maps_url(
 
     if any(dom in url.lower() for dom in ("maps.app.goo.gl", "goo.gl/maps")):
         try:
-            with httpx.Client(verify=certifi.where(), follow_redirects=True, timeout=8.0) as client:
+            with httpx.Client(verify=_get_ssl_verify(), follow_redirects=True, timeout=8.0) as client:
                 r = client.get(url, headers={"User-Agent": "Mozilla/5.0"})
                 url = str(r.url)
                 info["resolved_url"] = url
@@ -265,7 +438,7 @@ def fetch_google_places_data(
 
     place_obj: dict[str, Any] = {}
     try:
-        with httpx.Client(verify=certifi.where(), timeout=12.0) as client:
+        with httpx.Client(verify=_get_ssl_verify(), timeout=12.0) as client:
             # STEP 1: Recupero Place ID gratuito con Text Search (IDs Only)
             if not place_id:
                 query_parts = [maps_info.get("place_name") or name, address, city]
@@ -327,7 +500,10 @@ def fetch_google_places_data(
     neg_count = sum(1 for r in reviews if r["sentiment"] == "negativa")
     complaint_themes = _detect_complaint_themes(reviews)
     praise_themes = _detect_praise_themes(reviews)
-    photos = place_obj.get("photos") or []
+    photos = place_obj.get("photos")
+    # In Italia/EEA Google Places API (New) omette la lista photos per conformità regionale
+    photos_count = len(photos) if isinstance(photos, list) else None
+    has_photos = bool(photos) if photos is not None else None
 
     # Verifica se Google ha restituito eventuali info sulle risposte proprietario
     reply_known = [r for r in reviews if r.get("has_owner_reply") is not None]
@@ -346,7 +522,8 @@ def fetch_google_places_data(
         "maps_uri": place_obj.get("googleMapsUri", ""),
         "website_uri": place_obj.get("websiteUri", ""),
         "has_opening_hours": bool(place_obj.get("regularOpeningHours")),
-        "photos_count": len(photos),
+        "photos_count": photos_count,
+        "has_photos": has_photos,
         "has_editorial_summary": bool((place_obj.get("editorialSummary") or {}).get("text")),
         "business_status": place_obj.get("businessStatus", ""),
         "price_level": place_obj.get("priceLevel", ""),
@@ -477,7 +654,7 @@ def fetch_tripadvisor_terra_data(
     reviews_raw: Any = []
 
     try:
-        with httpx.Client(verify=certifi.where(), timeout=12.0) as client:
+        with httpx.Client(verify=_get_ssl_verify(), timeout=12.0) as client:
             # Step 1: Se non abbiamo ancora il location_id dall'URL, cercalo via Terra recommendations/search
             if not loc_id:
                 r_search = client.post(
@@ -659,7 +836,7 @@ def fetch_google_maps_brightdata_reviews(
     rows: list[dict[str, Any]] = []
     polls = max(6, int(max_wait_seconds // 4))
     try:
-        with httpx.Client(verify=certifi.where(), timeout=15.0) as client:
+        with httpx.Client(verify=_get_ssl_verify(), timeout=15.0) as client:
             resp = client.post(trigger_url, headers=headers, json=payload)
             if resp.status_code in (200, 202):
                 snap = resp.json().get("snapshot_id")
@@ -687,12 +864,22 @@ def fetch_google_maps_brightdata_reviews(
     reviews: list[dict[str, Any]] = []
     place_rating: float | None = None
     place_reviews_count: int | None = None
+    main_image: str | None = None
+    photos_and_videos: list[str] = []
+    is_claimed: bool | None = None
 
     # Espande sia righe piatte sia array nested (top_reviews / reviews / reviews_data) di gd_m8ebnr0q2qlklc02fz
     review_items: list[dict[str, Any]] = []
     for row in rows:
         if row.get("error") or row.get("error_code"):
             continue
+        if not main_image and row.get("main_image"):
+            main_image = str(row["main_image"]).strip()
+        pv = row.get("photos_and_videos")
+        if isinstance(pv, list) and pv and not photos_and_videos:
+            photos_and_videos = [str(x) for x in pv if x]
+        if is_claimed is None and "is_claimed" in row:
+            is_claimed = bool(row["is_claimed"])
         if place_rating is None:
             pr = row.get("rating") or row.get("overall_rating") or row.get("place_rating")
             try:
@@ -770,6 +957,10 @@ def fetch_google_maps_brightdata_reviews(
         "brightdata_google_used": True,
         "rating": place_rating,
         "reviews_count": place_reviews_count,
+        "main_image": main_image,
+        "photos_and_videos": photos_and_videos,
+        "has_photos": bool(main_image or photos_and_videos),
+        "is_claimed": is_claimed,
         "reviews": reviews,
         "analyzed_count": len(reviews),
         "positive_reviews_count": pos_c,
@@ -807,7 +998,7 @@ def fetch_facebook_brightdata_reviews(
 
     rows: list[dict[str, Any]] = []
     try:
-        with httpx.Client(verify=certifi.where(), timeout=15.0) as client:
+        with httpx.Client(verify=_get_ssl_verify(), timeout=15.0) as client:
             resp = client.post(trigger_url, headers=headers, json=payload)
             if resp.status_code in (200, 202):
                 snap = resp.json().get("snapshot_id")
@@ -946,7 +1137,7 @@ def fetch_facebook_public_reviews(facebook_url: str) -> dict[str, Any]:
     }
     try:
         from bs4 import BeautifulSoup
-        with httpx.Client(verify=certifi.where(), follow_redirects=True, timeout=8.0, headers=headers) as client:
+        with httpx.Client(verify=_get_ssl_verify(), follow_redirects=True, timeout=8.0, headers=headers) as client:
             for target in (reviews_url, base):
                 r = client.get(target)
                 if r.status_code != 200:
@@ -1178,6 +1369,102 @@ def run_reputation_and_social_audit(
         + (fb_rev_data.get("praise_themes") or [])
     ))
 
+    # --- FOTO GOOGLE MAPS: Combina Google Places API e Bright Data ---
+    bd_has_photos = bool(bd_g_data.get("has_photos"))
+    bd_main_image = bd_g_data.get("main_image", "")
+    bd_photos_sample = bd_g_data.get("photos_and_videos", [])
+    gp_photos_count = gp_data.get("photos_count")
+
+    if isinstance(gp_photos_count, int) and gp_photos_count > 0:
+        has_google_photos = True
+        effective_photos_count = gp_photos_count
+    elif bd_has_photos:
+        has_google_photos = True
+        effective_photos_count = len(bd_photos_sample) + (1 if bd_main_image else 0)
+    elif (google_reviews_count or 0) > 30:
+        has_google_photos = True
+        effective_photos_count = None
+    elif gp_data.get("has_photos") is False and not bd_has_photos and (google_reviews_count or 0) < 5:
+        has_google_photos = False
+        effective_photos_count = 0
+    else:
+        has_google_photos = True
+        effective_photos_count = None
+
+    # --- SOCIAL RECENCY: Sistema di voto 0-5 per Instagram e Facebook ---
+    latest_fb_date: str | None = None
+    latest_ig_date: str | None = None
+
+    # 1. Da recensioni/post Facebook (Bright Data restituisce date YYYY-MM-DD)
+    if fb_rev_data and fb_rev_data.get("reviews"):
+        fb_dates = [r["date"] for r in fb_rev_data["reviews"] if r.get("date")]
+        if fb_dates:
+            latest_fb_date = max(fb_dates)
+
+    # 2. Da search records e snippet web
+    for rec in osint_data.get("search_records", []):
+        u = rec.get("url", "").lower()
+        txt = f"{rec.get('title', '')} {rec.get('snippet', '')}"
+        extracted = _extract_date_from_text(txt)
+        if extracted:
+            if "facebook.com" in u and (not latest_fb_date or extracted > latest_fb_date):
+                latest_fb_date = extracted
+            elif "instagram.com" in u and (not latest_ig_date or extracted > latest_ig_date):
+                latest_ig_date = extracted
+
+    # 3. Input manuale opzionale (override o fallback)
+    if audit_input.last_social_post_date.strip():
+        manual_d = audit_input.last_social_post_date.strip()
+        if not latest_fb_date or manual_d > latest_fb_date:
+            latest_fb_date = manual_d
+        if not latest_ig_date or manual_d > latest_ig_date:
+            latest_ig_date = manual_d
+
+    def _days_ago_from_str(d_str: str | None) -> int | None:
+        if not d_str:
+            return None
+        try:
+            dt = datetime.strptime(d_str[:10], "%Y-%m-%d")
+            return max(0, (datetime.now() - dt).days)
+        except Exception:
+            return None
+
+    fb_days = _days_ago_from_str(latest_fb_date)
+    ig_days = _days_ago_from_str(latest_ig_date)
+
+    fb_recency = compute_social_recency_score(fb_days, channels["facebook"]["present"])
+    fb_recency["last_date"] = latest_fb_date or ""
+    channels["facebook"]["recency"] = fb_recency
+
+    ig_recency = compute_social_recency_score(ig_days, channels["instagram"]["present"])
+    ig_recency["last_date"] = latest_ig_date or ""
+    channels["instagram"]["recency"] = ig_recency
+
+    for cname in ("tiktok", "youtube", "whatsapp"):
+        channels[cname]["recency"] = compute_social_recency_score(None, channels[cname]["present"])
+
+    scored_channels = [channels[c]["recency"]["score"] for c in ("instagram", "facebook") if channels[c]["present"]]
+    overall_social_recency_score = round(sum(scored_channels) / len(scored_channels)) if scored_channels else 0
+
+    known_days = [d for d in (fb_days, ig_days) if d is not None]
+    min_days_since_post = min(known_days) if known_days else None
+    latest_known_date = max([d for d in (latest_fb_date, latest_ig_date) if d]) if any((latest_fb_date, latest_ig_date)) else ""
+
+    social_data = {
+        "channels": channels,
+        "active_core_count": active_core_socials,
+        "last_post_date": latest_known_date,
+        "days_since_last_post": min_days_since_post,
+        "instagram_recency": ig_recency,
+        "facebook_recency": fb_recency,
+        "overall_recency_score": overall_social_recency_score,
+        "social_inactivity_level": (
+            "critica" if (min_days_since_post is not None and min_days_since_post >= 35)
+            else ("alta" if (min_days_since_post is not None and min_days_since_post > 14)
+                  else ("attiva" if (min_days_since_post is not None and min_days_since_post <= 14) else "non_dichiarata"))
+        ),
+    }
+
     reviews_data: dict[str, Any] = {
         "google_maps_url": google_maps_url,
         "google_place_id": gp_data.get("place_id") or audit_input.google_place_id.strip(),
@@ -1214,7 +1501,10 @@ def run_reputation_and_social_audit(
         "praise_themes": merged_praises,
         "google_profile": {
             "has_opening_hours": gp_data.get("has_opening_hours"),
-            "photos_count": gp_data.get("photos_count"),
+            "photos_count": effective_photos_count,
+            "has_photos": has_google_photos,
+            "main_image": bd_main_image,
+            "photos_sample": bd_photos_sample,
             "has_phone": bool(gp_data.get("phone")),
             "phone": gp_data.get("phone", ""),
             "has_website": bool(gp_data.get("website_uri")),
@@ -1223,6 +1513,7 @@ def run_reputation_and_social_audit(
             "has_editorial_summary": gp_data.get("has_editorial_summary"),
             "reservable": gp_data.get("reservable"),
             "business_status": gp_data.get("business_status", ""),
+            "is_claimed": bd_g_data.get("is_claimed"),
         },
         "osint_portals_found": len(osint_data.get("review_portal_hits", [])),
     }

@@ -61,7 +61,10 @@ def _check_ssl(hostname: str, port: int = 443) -> dict[str, Any]:
         "error": "",
     }
     try:
-        ctx = ssl.create_default_context(cafile=certifi.where())
+        try:
+            ctx = ssl.create_default_context()
+        except Exception:
+            ctx = ssl.create_default_context(cafile=certifi.where())
         with socket.create_connection((hostname, port), timeout=6.0) as sock:
             with ctx.wrap_socket(sock, server_hostname=hostname) as ssock:
                 cert = ssock.getpeercert()
@@ -358,7 +361,12 @@ def run_website_and_menu_audit(
         "Accept-Language": "it-IT,it;q=0.9,en;q=0.8",
     }
 
-    with httpx.Client(headers=headers, verify=certifi.where(), follow_redirects=True, timeout=12.0) as client:
+    try:
+        ssl_ctx = ssl.create_default_context()
+    except Exception:
+        ssl_ctx = certifi.where()
+
+    with httpx.Client(headers=headers, verify=ssl_ctx, follow_redirects=True, timeout=12.0) as client:
         if site_url:
             t0 = time.perf_counter()
             try:

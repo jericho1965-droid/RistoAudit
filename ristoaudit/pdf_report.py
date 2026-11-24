@@ -145,12 +145,13 @@ def _slugify(value: str) -> str:
     return slug[:40] or "ristorante"
 
 
-def generate_pdf_report(result: AuditResult, output_dir: Path) -> Path:
+def generate_pdf_report(result: AuditResult, output_dir: Path | str) -> Path:
     """Genera il file PDF completo e restituisce il percorso del file creato."""
-    output_dir.mkdir(parents=True, exist_ok=True)
+    out_path = Path(output_dir) if isinstance(output_dir, str) else output_dir
+    out_path.mkdir(parents=True, exist_ok=True)
     inp = result.input_data
     slug = _slugify(inp.get("restaurant_name", "ristorante"))
-    pdf_path = output_dir / f"RistoAudit_{slug}_{result.audit_id}.pdf"
+    pdf_path = out_path / f"RistoAudit_{slug}_{result.audit_id}.pdf"
 
     font_reg, font_bold = _register_fonts()
     styles = getSampleStyleSheet()
@@ -443,8 +444,9 @@ def generate_pdf_report(result: AuditResult, output_dir: Path) -> Path:
     soc_rows = [[
         Paragraph("Canale", s_th),
         Paragraph("Presenza", s_th),
-        Paragraph("Fonte Rilevazione", s_th),
-        Paragraph("URL / Dettaglio", s_th),
+        Paragraph("Voto Attività", s_th),
+        Paragraph("Ultima Interazione", s_th),
+        Paragraph("URL / Presidio", s_th),
     ]]
     source_labels = {
         "modulo": "Fornito",
@@ -455,14 +457,46 @@ def generate_pdf_report(result: AuditResult, output_dir: Path) -> Path:
     for cname in ("instagram", "facebook", "tiktok", "youtube", "whatsapp"):
         ch = soc_ch.get(cname, {})
         raw_src = str(ch.get("source", "assente"))
+        rec = ch.get("recency") or {}
+        score_val = rec.get("score")
+        if not ch.get("present"):
+            score_col = "#64748B"
+            score_txt = "0/5"
+            time_txt = "Non presente"
+        elif score_val is not None:
+            if score_val >= 4:
+                score_col = "#16A34A"
+            elif score_val == 3:
+                score_col = "#D97706"
+            elif score_val >= 1:
+                score_col = "#EA580C"
+            else:
+                score_col = "#DC2626"
+            score_txt = rec.get("score_str", f"{score_val}/5")
+            if rec.get("days_ago") is not None:
+                d_ago = rec["days_ago"]
+                if d_ago <= 7:
+                    time_txt = f"Ultima settimana ({d_ago} gg fa)"
+                elif d_ago <= 35:
+                    time_txt = f"{rec.get('weeks_ago', 2)} sett. fa ({d_ago} gg)"
+                else:
+                    time_txt = f"Oltre 5 sett. fa ({rec.get('weeks_ago', 5)} sett.)"
+            else:
+                time_txt = rec.get("status_label") or "Data non pubblica"
+        else:
+            score_col = "#64748B"
+            score_txt = "N/D"
+            time_txt = "Non rilevata"
+
         soc_rows.append([
             Paragraph(cname.capitalize(), s_cell_b),
             Paragraph("Presente" if ch.get("present") else "Assente", s_cell),
-            Paragraph(_esc(source_labels.get(raw_src, raw_src)), s_cell),
-            Paragraph(_esc((ch.get("url") or "—")[:65]), s_small),
+            Paragraph(f"<font color='{score_col}'><b>{score_txt}</b></font>", ParagraphStyle("ScCell", parent=s_cell, alignment=TA_CENTER)),
+            Paragraph(_esc(time_txt), s_small),
+            Paragraph(_esc((ch.get("url") or "—")[:48]), s_small),
         ])
 
-    soc_tbl = Table(soc_rows, colWidths=[usable_w * 0.16, usable_w * 0.14, usable_w * 0.18, usable_w * 0.52])
+    soc_tbl = Table(soc_rows, colWidths=[usable_w * 0.16, usable_w * 0.13, usable_w * 0.13, usable_w * 0.28, usable_w * 0.30])
     soc_tbl.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), NAVY),
         ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, LIGHT_BG]),
@@ -474,12 +508,23 @@ def generate_pdf_report(result: AuditResult, output_dir: Path) -> Path:
         ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
     ]))
     story.append(soc_tbl)
+    story.append(Spacer(1, 3))
+    story.append(Paragraph(
+        "<font color='#64748B' size='7'><b>Sistema di voto attività social:</b> 5/5 = post nell'ultima settimana • 4/5 = 2 settimane fa • 3/5 = 3 settimane fa • 2/5 = 4 settimane fa • 1/5 = 5 settimane fa • 0/5 = oltre 5 settimane fa o canale assente.</font>",
+        s_small
+    ))
     story.append(Spacer(1, 6))
+
+    gprof = rev.get("google_profile", {})
+    photo_str = "Presente (Galleria attiva)" if (gprof.get("has_photos") or gprof.get("main_image") or (rev.get("google_reviews_count") or 0) > 20) else (f"{gprof.get('photos_count')} foto" if gprof.get("photos_count") else "Da verificare")
+    if gprof.get("photos_count"):
+        photo_str = f"Presente ({gprof['photos_count']} foto)"
 
     fb_bit = f"  •  <b>Facebook:</b> {_esc(rev['facebook_reviews_summary'])}" if rev.get("facebook_reviews_summary") else ""
     rev_summary = (
         f"<b>Valutazione Google:</b> {rev.get('google_rating') or 'N/D'}/5 "
         f"({rev.get('google_reviews_count') or 'N/D'} recensioni)  •  "
+        f"<b>Foto Google:</b> {photo_str}  •  "
         f"<b>TripAdvisor:</b> {rev.get('tripadvisor_rating') or 'N/D'}/5{fb_bit}  •  "
         f"<b>Recensioni senza risposta:</b> {rev.get('unanswered_reviews_count') if rev.get('unanswered_reviews_count') is not None else 'N/D'} "
         f"(di cui negative: {rev.get('unanswered_negative_reviews') if rev.get('unanswered_negative_reviews') is not None else 'N/D'})"

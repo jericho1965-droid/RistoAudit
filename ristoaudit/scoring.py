@@ -489,17 +489,31 @@ def run_full_audit(audit_input: AuditInput) -> AuditResult:
             recommendation="Completare l'ecosistema collegando i profili al sito web e mantenendo una pubblicazione regolare.",
         ))
 
-    if social_data["social_inactivity_level"] == "attiva":
+    ig_rec = channels.get("instagram", {}).get("recency") or {}
+    fb_rec = channels.get("facebook", {}).get("recency") or {}
+
+    # Punti di forza recency / attività social (voti 4/5 o 5/5)
+    if channels.get("instagram", {}).get("present") and ig_rec.get("score", 0) >= 4:
         strengths.append(Finding(
             category="social",
             severity="OTTIMO",
-            title="Canali social aggiornati di recente",
-            description=f"L'ultimo contenuto pubblicato risale al {social_data['last_post_date']} ({social_data['days_since_last_post']} giorni fa).",
-            business_impact="Dimostra ai potenziali clienti che il locale è vivo, curato e attivo ogni settimana.",
-            recommendation="Mantenere questa frequenza costante alternando foto piatti, sala, staff e recensioni dei clienti.",
+            title=f"Canale Instagram attivo e aggiornato ({ig_rec.get('score_str', '5/5')})",
+            description=f"Ultima attività rilevata {ig_rec.get('description', '')}.",
+            business_impact="Mantiene vivo l'interesse dei clienti abituali e attira nuovi avventori mostrando con costanza i piatti e l'atmosfera del locale.",
+            recommendation="Mantenere questo ritmo di pubblicazione alternando Reel su piatti signature, dietro le quinte e stories quotidiane.",
         ))
 
-    # Criticità Social
+    if channels.get("facebook", {}).get("present") and fb_rec.get("score", 0) >= 4:
+        strengths.append(Finding(
+            category="social",
+            severity="OTTIMO",
+            title=f"Pagina Facebook attiva e presidiata ({fb_rec.get('score_str', '5/5')})",
+            description=f"Ultima attività rilevata {fb_rec.get('description', '')}.",
+            business_impact="Fidelizza il pubblico locale e le famiglie per pranzi domenicali, ricorrenze e cene di gruppo.",
+            recommendation="Continuare a condividere eventi, novità del menù e rispondere tempestivamente alle interazioni della community.",
+        ))
+
+    # Criticità Social: Presenza di base
     if not channels["instagram"]["present"]:
         social_score -= 30
         findings.append(Finding(
@@ -537,29 +551,71 @@ def run_full_audit(audit_input: AuditInput) -> AuditResult:
             recommendation=f"Ripubblicare gli stessi brevi Reel di Instagram anche su TikTok con hashtag e geolocalizzazione su {audit_input.city}.",
         ))
 
-    if social_data["social_inactivity_level"] == "critica":
-        social_score -= 30
-        findings.append(Finding(
-            category="social",
-            severity="CRITICO",
-            title=f"Profili social abbandonati da {social_data['days_since_last_post']} giorni",
-            description=f"L'ultimo post rilevato risale al {social_data['last_post_date']} (oltre 3 mesi di silenzio).",
-            business_impact=(
-                "Un profilo social fermo da mesi è peggio di non averlo: il potenziale cliente pensa che il locale abbia chiuso, "
-                "abbia cambiato gestione o non curi la propria immagine."
-            ),
-            recommendation="Riattivare subito il profilo con un calendario minimo ma costante (almeno 2 post/reel e 4 stories a settimana).",
-        ))
-    elif social_data["social_inactivity_level"] == "alta":
-        social_score -= 15
-        findings.append(Finding(
-            category="social",
-            severity="ALTO",
-            title=f"Pubblicazione social discontinua ({social_data['days_since_last_post']} giorni dall'ultimo post)",
-            description=f"L'ultimo contenuto pubblicato risale al {social_data['last_post_date']}.",
-            business_impact="Gli algoritmi di Instagram e Facebook penalizzano i profili incostanti, azzerando la visibilità anche verso chi già segue il ristorante.",
-            recommendation="Pianificare una routine settimanale fissa (es. martedì piatto signature, venerdì invito al weekend).",
-        ))
+    # Criticità Social: Tempo trascorso dall'ultima interazione (Sistema di voto 0-5)
+    # Instagram Recency
+    if channels.get("instagram", {}).get("present"):
+        ig_score = ig_rec.get("score")
+        if ig_score == 0:
+            social_score -= 25
+            findings.append(Finding(
+                category="social",
+                severity="CRITICO",
+                title=f"Profilo Instagram inattivo da oltre 5 settimane (Punteggio attività: 0/5)",
+                description=(
+                    f"L'ultima attività o interazione rilevata su Instagram risale a "
+                    f"{ig_rec.get('weeks_ago', 'oltre 5')} settimane fa ({ig_rec.get('days_ago', 'N/D')} giorni fa). "
+                    f"Il canale non registra pubblicazioni recenti."
+                ),
+                business_impact=(
+                    "Un profilo social fermo da più di un mese è percepito negativamente dai clienti: molti pensano che il ristorante abbia chiuso, "
+                    "abbia cambiato gestione o non curi l'offerta. Inoltre l'algoritmo di Meta penalizza drasticamente la visibilità organica "
+                    "dei profili inattivi, azzerando la portata verso follower e nuovi clienti."
+                ),
+                recommendation=(
+                    "Riattivare subito il canale con almeno 2-3 post/reel a settimana e stories quotidiane per risalire al punteggio di 5/5 "
+                    "e recuperare visibilità nell'algoritmo locale."
+                ),
+            ))
+        elif ig_score in (1, 2):
+            social_score -= 15
+            findings.append(Finding(
+                category="social",
+                severity="ALTO",
+                title=f"Frequenza di pubblicazione discontinua su Instagram ({ig_rec.get('weeks_ago', 4)} settimane fa • Punteggio: {ig_score}/5)",
+                description=(
+                    f"L'ultimo post o interazione rilevata su Instagram risale a circa {ig_rec.get('weeks_ago', 4)} settimane fa "
+                    f"({ig_rec.get('days_ago', 'N/D')} giorni fa)."
+                ),
+                business_impact="La pubblicazione a singhiozzo azzera la copertura organica e non crea fidelizzazione nei clienti che cercano dove andare a cena nel weekend.",
+                recommendation="Pianificare una routine editoriale fissa (almeno 2 contenuti a settimana) per raggiungere la fascia di voto 5/5.",
+            ))
+
+    # Facebook Recency
+    if channels.get("facebook", {}).get("present"):
+        fb_score = fb_rec.get("score")
+        if fb_score == 0:
+            social_score -= 20
+            findings.append(Finding(
+                category="social",
+                severity="CRITICO",
+                title=f"Pagina Facebook inattiva da oltre 5 settimane (Punteggio attività: 0/5)",
+                description=(
+                    f"L'ultima attività o interazione rilevata sulla pagina Facebook risale a "
+                    f"{fb_rec.get('weeks_ago', 'oltre 5')} settimane fa ({fb_rec.get('days_ago', 'N/D')} giorni fa)."
+                ),
+                business_impact="Si interrompe il dialogo con la clientela locale e il pubblico over 35, che usa Facebook per informarsi su orari, festività e pranzi della domenica.",
+                recommendation="Sincronizzare la Pagina Facebook a Instagram tramite Meta Business Suite per ripubblicare i contenuti in automatico e tornare a 5/5.",
+            ))
+        elif fb_score in (1, 2):
+            social_score -= 10
+            findings.append(Finding(
+                category="social",
+                severity="MEDIO",
+                title=f"Pubblicazione Facebook irregolare ({fb_rec.get('weeks_ago', 4)} settimane fa • Punteggio: {fb_score}/5)",
+                description=f"L'ultima attività su Facebook risale a circa {fb_rec.get('weeks_ago', 4)} settimane fa ({fb_rec.get('days_ago', 'N/D')} giorni fa).",
+                business_impact="La bassa frequenza di aggiornamento riduce la fiducia dei clienti e le visualizzazioni del menù.",
+                recommendation="Mantenere un calendario costante collegando la condivisione diretta tra Instagram e Facebook.",
+            ))
 
     if website_data["reachable"] and not any(channels[c]["linked_on_website"] for c in ("instagram", "facebook")):
         social_score -= 10
@@ -855,14 +911,28 @@ def run_full_audit(audit_input: AuditInput) -> AuditResult:
                 business_impact="I clienti che cercano un locale 'aperto ora' vengono esclusi automaticamente dai risultati di Google Maps.",
                 recommendation="Compilare subito orari di pranzo, cena, giorno di chiusura e aperture festive su Google Business Profile.",
             ))
-        if isinstance(gprof.get("photos_count"), int) and gprof["photos_count"] < 5:
+        # Foto e contenuti visivi su Google Maps
+        has_g_photos = gprof.get("has_photos") or bool(gprof.get("main_image")) or ((reviews_data.get("google_reviews_count") or 0) > 20)
+        if has_g_photos:
+            p_desc = "La scheda Google Maps dispone di immagine principale e galleria fotografica curata con scatti del locale e dei piatti."
+            if gprof.get("photos_count"):
+                p_desc = f"La scheda Google Maps dispone di immagine principale e galleria fotografica attiva ({gprof['photos_count']} foto rilevate)."
+            strengths.append(Finding(
+                category="reviews",
+                severity="OTTIMO",
+                title="Galleria fotografica attiva e visibile su Google Maps",
+                description=p_desc,
+                business_impact="Le schede Google Maps con foto curate generano fino al 42% in più di richieste di indicazioni stradali e visite al sito web.",
+                recommendation="Continuare a caricare periodicamente nuove foto in alta risoluzione dei piatti del menù stagionale e dell'ambiente.",
+            ))
+        elif gprof.get("has_photos") is False and (gprof.get("photos_count") == 0) and not gprof.get("main_image") and (reviews_data.get("google_reviews_count") or 0) < 5:
             rev_score -= 8
             findings.append(Finding(
                 category="reviews",
                 severity="MEDIO",
-                title=f"Galleria fotografica scarna su Google Maps ({gprof['photos_count']} foto rilevate)",
-                description="La scheda Google dispone di pochissime fotografie ufficiali.",
-                business_impact="Le schede con foto curate di piatti e sala ottengono fino al 42% in più di richieste di indicazioni stradali e clic al sito.",
+                title="Galleria fotografica scarna o assente su Google Maps",
+                description="La scheda Google dispone di pochissime fotografie ufficiali o ne risulta priva.",
+                business_impact="Le schede prive di foto di piatti e sala subiscono un forte calo di interesse da parte di turisti e nuovi clienti.",
                 recommendation="Caricare almeno 15-20 foto luminose e aggiornate di piatti signature, interni, esterno e staff.",
             ))
         if not gprof.get("has_phone"):
