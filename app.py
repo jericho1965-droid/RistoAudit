@@ -20,6 +20,7 @@ from typing import Any
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
+from ristoaudit.city_restaurants import DATA_DIR, ITALIAN_CITIES, get_city_restaurants
 from ristoaudit.models import AuditInput
 from ristoaudit.pdf_report import generate_pdf_report
 from ristoaudit.scoring import run_full_audit
@@ -181,9 +182,24 @@ class RistoAuditHandler(BaseHTTPRequestHandler):
                 tpl.render(
                     recent_pdfs=[p.name for p in recent_pdfs],
                     saved=_load_saved_settings(),
+                    cities=ITALIAN_CITIES,
                     error="",
                 )
             )
+            return
+
+        if path == "/api/restaurants":
+            qs = urllib.parse.parse_qs(parsed.query)
+            city_q = (qs.get("city") or [""])[0].strip()
+            refresh_q = (qs.get("refresh") or ["0"])[0].lower() in ("1", "true", "yes")
+            saved = _load_saved_settings()
+            data = get_city_restaurants(
+                city=city_q,
+                google_places_api_key=saved.get("google_places_api_key", ""),
+                force_refresh=refresh_q,
+                limit=50,
+            )
+            self._send_json(data)
             return
 
         if path == "/assets/ristoaudit-logo.png":
@@ -244,6 +260,27 @@ class RistoAuditHandler(BaseHTTPRequestHandler):
             self._send_html(tpl.render(result=job["result"], pdf_filename=job["pdf_filename"]))
             return
 
+        if path.startswith("/download-data/"):
+            filename = urllib.parse.unquote(path[len("/download-data/"):])
+            if "/" in filename or "\\" in filename or ".." in filename or not (
+                filename.endswith(".json") or filename.endswith(".csv")
+            ):
+                self.send_error(HTTPStatus.BAD_REQUEST, "Nome file non valido")
+                return
+            data_file = DATA_DIR / filename
+            if not data_file.exists():
+                self.send_error(HTTPStatus.NOT_FOUND, "File dati non trovato")
+                return
+            content = data_file.read_bytes()
+            ctype = "text/csv; charset=utf-8" if filename.endswith(".csv") else "application/json; charset=utf-8"
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            self.send_header("Content-Length", str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
+            return
+
         if path.startswith("/download/"):
             filename = urllib.parse.unquote(path[len("/download/"):])
             if "/" in filename or "\\" in filename or ".." in filename or not filename.endswith(".pdf"):
@@ -286,6 +323,7 @@ class RistoAuditHandler(BaseHTTPRequestHandler):
                 tpl.render(
                     recent_pdfs=[],
                     saved=_load_saved_settings(),
+                    cities=ITALIAN_CITIES,
                     error="Inserisci almeno il Nome del Ristorante e la Città.",
                 ),
                 status=400,

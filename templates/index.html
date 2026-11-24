@@ -117,7 +117,7 @@
       margin-bottom: 5px;
     }
     label .req { color: #dc2626; }
-    input[type="text"], input[type="url"], input[type="password"], input[type="number"], input[type="date"], textarea {
+    input[type="text"], input[type="url"], input[type="password"], input[type="number"], input[type="date"], select, textarea {
       width: 100%;
       padding: 10px 12px;
       border: 1px solid #cbd5e1;
@@ -126,7 +126,7 @@
       font-family: inherit;
       background: #fff;
     }
-    input:focus, textarea:focus {
+    input:focus, select:focus, textarea:focus {
       outline: none;
       border-color: var(--accent);
       box-shadow: 0 0 0 3px rgba(194, 65, 12, 0.12);
@@ -266,6 +266,37 @@
     {% endif %}
 
     <form id="audit-form" action="/audit" method="POST">
+      <!-- SELEZIONE RAPIDA DA DATABASE CITTA' & 50 RISTORANTI -->
+      <section class="card" style="background:#fff7ed; border-color:#fdba74;">
+        <h2 style="color:#9a3412;">Selezione Rapida per Città (Database 50 Ristoranti)</h2>
+        <p class="sub" style="color:#7c2d12;">Scegli una città italiana per caricare i 50 ristoranti principali in JSON e compilare automaticamente tutti i campi sottostanti.</p>
+        <div class="grid">
+          <div>
+            <label for="select_city">1. Città Italiana</label>
+            <select id="select_city">
+              <option value="">— Seleziona una città —</option>
+              {% for c in cities %}
+              <option value="{{ c }}">{{ c }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div>
+            <label for="select_restaurant">2. Ristorante (Top 50 della città)</label>
+            <div style="display:flex; gap:8px;">
+              <select id="select_restaurant" disabled>
+                <option value="">— Prima seleziona una città —</option>
+              </select>
+              <button type="button" id="refresh_restaurants_btn" title="Aggiorna lista da Google Places" style="display:none; padding:0 12px; border:1px solid #cbd5e1; border-radius:8px; background:#fff; cursor:pointer; font-weight:700;">↻</button>
+            </div>
+            <div id="city_load_status" class="hint" style="color:#9a3412; font-weight:600;"></div>
+            <div id="city_export_links" class="hint" style="display:none; margin-top:6px;">
+              <a id="download_csv_link" href="#" style="margin-right:12px;">📥 Scarica Excel/CSV</a>
+              <a id="download_json_link" href="#">📥 Scarica JSON</a>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <!-- BLOCCO PRINCIPALE ULTRA-RAPIDO -->
       <section class="card">
         <h2>1. Ristorante da Analizzare</h2>
@@ -349,6 +380,10 @@
         </div>
       </section>
 
+      <input type="hidden" id="google_place_id" name="google_place_id" value="">
+      <input type="hidden" id="address" name="address" value="">
+      <input type="hidden" id="google_rating" name="google_rating" value="">
+      <input type="hidden" id="google_reviews_count" name="google_reviews_count" value="">
       <input type="hidden" name="run_ominis_search" value="1">
       <input type="hidden" name="run_ominis_username" value="1">
       <input type="hidden" name="deep_link_check" value="1">
@@ -381,6 +416,118 @@
     document.getElementById("audit-form").addEventListener("submit", function () {
       document.getElementById("loading-overlay").style.display = "flex";
     });
+
+    (function () {
+      const citySelect = document.getElementById("select_city");
+      const restSelect = document.getElementById("select_restaurant");
+      const refreshBtn = document.getElementById("refresh_restaurants_btn");
+      const statusEl = document.getElementById("city_load_status");
+      const exportLinksEl = document.getElementById("city_export_links");
+      const csvLinkEl = document.getElementById("download_csv_link");
+      const jsonLinkEl = document.getElementById("download_json_link");
+      let loadedRestaurants = [];
+
+      const fieldIds = [
+        "restaurant_name", "city", "google_maps_url", "google_place_id", "address",
+        "google_rating", "google_reviews_count", "instagram_url", "facebook_url",
+        "tiktok_url", "social_handle", "website_url", "menu_url",
+        "tripadvisor_url", "thefork_url", "cuisine_type", "reviews_notes"
+      ];
+
+      function populateForm(r) {
+        if (!r) return;
+        const resolved = {
+          restaurant_name: r.restaurant_name || r.name || "",
+          city: r.city || citySelect.value || "",
+          google_maps_url: r.google_maps_url || r.location_link || (r.place_id ? "https://www.google.com/maps/place/?q=place_id:" + r.place_id : ""),
+          google_place_id: r.google_place_id || r.place_id || "",
+          address: r.address || "",
+          google_rating: r.google_rating !== undefined && r.google_rating !== null ? r.google_rating : (r.rating ?? ""),
+          google_reviews_count: r.google_reviews_count !== undefined && r.google_reviews_count !== null ? r.google_reviews_count : (r.reviews ?? ""),
+          instagram_url: r.instagram_url || r.company_instagram || "",
+          facebook_url: r.facebook_url || r.company_facebook || "",
+          tiktok_url: r.tiktok_url || "",
+          social_handle: r.social_handle || "",
+          website_url: r.website_url || r.website || "",
+          menu_url: r.menu_url || r.menu_link || "",
+          tripadvisor_url: r.tripadvisor_url || "",
+          thefork_url: r.thefork_url || "",
+          cuisine_type: r.cuisine_type || r.category || r.type || "",
+          reviews_notes: r.reviews_notes || ""
+        };
+        fieldIds.forEach(function (fid) {
+          const el = document.getElementById(fid);
+          if (el) {
+            el.value = resolved[fid] !== undefined && resolved[fid] !== null ? String(resolved[fid]) : "";
+          }
+        });
+      }
+
+      async function loadCityRestaurants(city, forceRefresh) {
+        if (!city) {
+          restSelect.innerHTML = '<option value="">— Prima seleziona una città —</option>';
+          restSelect.disabled = true;
+          refreshBtn.style.display = "none";
+          exportLinksEl.style.display = "none";
+          statusEl.textContent = "";
+          loadedRestaurants = [];
+          return;
+        }
+        restSelect.disabled = true;
+        restSelect.innerHTML = '<option value="">Caricamento 50 ristoranti in corso...</option>';
+        statusEl.textContent = forceRefresh
+          ? "Aggiornamento 50 ristoranti e dati social da Google Places in corso..."
+          : "Recupero lista ristoranti (cache JSON / Google Places)...";
+        try {
+          const url = "/api/restaurants?city=" + encodeURIComponent(city) + (forceRefresh ? "&refresh=1" : "");
+          const resp = await fetch(url);
+          const data = await resp.json();
+          if (data.error) {
+            statusEl.textContent = "Errore: " + data.error;
+            restSelect.innerHTML = '<option value="">— Errore caricamento —</option>';
+            return;
+          }
+          loadedRestaurants = data.restaurants || [];
+          restSelect.innerHTML = '<option value="">— Seleziona un ristorante (' + loadedRestaurants.length + ' trovati) —</option>';
+          loadedRestaurants.forEach(function (r, idx) {
+            const opt = document.createElement("option");
+            opt.value = String(idx);
+            const ratingStr = r.google_rating ? " (" + r.google_rating + "★ • " + (r.google_reviews_count || 0) + " rec.)" : "";
+            opt.textContent = (idx + 1) + ". " + r.restaurant_name + ratingStr;
+            restSelect.appendChild(opt);
+          });
+          restSelect.disabled = false;
+          refreshBtn.style.display = "inline-block";
+          if (data.csv_file && data.file) {
+            csvLinkEl.href = "/download-data/" + encodeURIComponent(data.csv_file);
+            jsonLinkEl.href = "/download-data/" + encodeURIComponent(data.file);
+            exportLinksEl.style.display = "block";
+          }
+          statusEl.textContent = (data.cached ? "✓ Caricati da locale (" : "✓ Salvati in locale (") + "data/" + data.file + " & " + data.csv_file + ") — seleziona un ristorante per compilare i campi.";
+          document.getElementById("city").value = city;
+        } catch (err) {
+          statusEl.textContent = "Errore di rete durante il caricamento dei ristoranti.";
+          restSelect.innerHTML = '<option value="">— Errore —</option>';
+        }
+      }
+
+      citySelect.addEventListener("change", function () {
+        loadCityRestaurants(citySelect.value, false);
+      });
+
+      refreshBtn.addEventListener("click", function () {
+        if (citySelect.value) {
+          loadCityRestaurants(citySelect.value, true);
+        }
+      });
+
+      restSelect.addEventListener("change", function () {
+        const idx = parseInt(restSelect.value, 10);
+        if (!isNaN(idx) && loadedRestaurants[idx]) {
+          populateForm(loadedRestaurants[idx]);
+        }
+      });
+    })();
   </script>
 </body>
 </html>
