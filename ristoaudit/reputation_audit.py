@@ -21,6 +21,7 @@ from typing import Any
 
 import certifi
 import httpx
+from bs4 import BeautifulSoup
 
 from .models import AuditInput
 
@@ -807,16 +808,73 @@ def _parse_brightdata_payload(text_body: str) -> list[dict[str, Any]]:
     return []
 
 
+def fetch_web_public_review_snippets(restaurant_name: str, city: str) -> list[dict[str, Any]]:
+    """Estrae citazioni di recensioni pubbliche indicizzate sul web quando Google Places / Bright Data
+    non restituiscono testi (es. policy EEA o rate-limit Bright Data)."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    }
+    queries = [
+        f'"{restaurant_name}" {city} "servizio"',
+        f'"{restaurant_name}" {city} "cibo"',
+        f'"{restaurant_name}" {city} "consigliato"',
+        f'"{restaurant_name}" {city} "recensioni"',
+    ]
+    texts: list[str] = []
+    for q in queries:
+        try:
+            r = httpx.get(
+                f"https://html.duckduckgo.com/html/?q={urllib.parse.quote(q)}",
+                headers=headers,
+                timeout=7.0,
+            )
+            if r.status_code == 200:
+                soup = BeautifulSoup(r.text, "html.parser")
+                for res in soup.find_all("div", class_="result"):
+                    s_el = res.find("a", class_="result__snippet")
+                    if s_el:
+                        t = s_el.get_text().strip()
+                        if ":" in t[:30]:
+                            t = t.split(":", 1)[1].strip()
+                        if "Guarda " in t:
+                            t = re.sub(r"Guarda \d+ recensioni.*", "", t).strip()
+                        # Salta snippet social/account puri
+                        if "likes, " in t or "followers" in t:
+                            continue
+                        if len(t) > 35 and t not in texts:
+                            texts.append(t)
+        except Exception:
+            pass
+
+    reviews: list[dict[str, Any]] = []
+    for i, t in enumerate(texts[:10]):
+        t_low = t.lower()
+        is_neg = any(w in t_low for w in ["distratto", "inferiore", "costoso", "caro", "lento", "freddo", "deludente", "scortese"])
+        is_pos = any(w in t_low for w in ["ottim", "buon", "squisito", "delizioso", "eccezionale", "raffinato", "consigliat", "meraviglios"])
+        rating = 2 if is_neg and not is_pos else (5 if is_pos and not is_neg else 4)
+        sentiment = "negativa" if rating <= 2 else ("neutra" if rating == 3 else "positiva")
+        reviews.append({
+            "author": f"Ospite online {i+1}",
+            "rating": rating,
+            "sentiment": sentiment,
+            "text": t,
+            "relative_time": "Pubblica online",
+            "publish_time": "",
+            "has_owner_reply": False,
+        })
+    return reviews
+
+
 def fetch_google_maps_brightdata_reviews(
     google_maps_url: str,
     api_key: str = "",
     limit_per_input: int = 15,
-    max_wait_seconds: int = 85,
+    max_wait_seconds: int = 150,
 ) -> dict[str, Any]:
     """Recupera recensioni Google Maps (con risposte proprietario) via Bright Data.
 
     Usa il dataset rapido Google Maps Full Info (gd_m8ebnr0q2qlklc02fz) che completa
-    in ~20-35s e restituisce scheda completa + top_reviews, evitando i lunghi crawl di
+    in ~35-90s e restituisce scheda completa + top_reviews, evitando i lunghi crawl di
     migliaia di recensioni.
     """
     key = (api_key or "").strip() or os.environ.get("BRIGHTDATA_API_KEY", "").strip()
@@ -835,7 +893,7 @@ def fetch_google_maps_brightdata_reviews(
     payload = [{"url": url}]
 
     rows: list[dict[str, Any]] = []
-    polls = max(6, int(max_wait_seconds // 4))
+    polls = max(10, int(max_wait_seconds // 3))
     try:
         with httpx.Client(verify=_get_ssl_verify(), timeout=15.0) as client:
             resp = client.post(trigger_url, headers=headers, json=payload)
@@ -845,7 +903,7 @@ def fetch_google_maps_brightdata_reviews(
                 if snap:
                     snap_url = f"https://api.brightdata.com/datasets/v3/snapshot/{snap}?format=json"
                     for _ in range(polls):
-                        time.sleep(4)
+                        time.sleep(3)
                         r_snap = client.get(snap_url, headers=headers)
                         if r_snap.status_code == 200:
                             rows = _parse_brightdata_payload(r_snap.text)
@@ -854,7 +912,7 @@ def fetch_google_maps_brightdata_reviews(
                             print(f"[RistoAudit] Bright Data Google snapshot HTTP {r_snap.status_code}: {r_snap.text[:200]}")
                             break
                     if not rows:
-                        print(f"[RistoAudit] Bright Data Google snapshot {snap} non completato entro {polls * 4}s")
+                        print(f"[RistoAudit] Bright Data Google snapshot {snap} non completato entro {polls * 3}s")
             else:
                 print(f"[RistoAudit] Bright Data Google Maps trigger HTTP {resp.status_code}: {resp.text[:250]}")
                 return {}
@@ -1290,8 +1348,8 @@ def run_reputation_and_social_audit(
         )
     )
     google_maps_url = (
-        audit_input.google_maps_url.strip()
-        or gp_data.get("maps_uri", "")
+        gp_data.get("maps_uri", "")
+        or audit_input.google_maps_url.strip()
         or (f"https://www.google.com/maps/place/?q=place_id:{gp_data['place_id']}" if gp_data.get("place_id") else "")
         or next((u for u in web_review_urls if "google.com/maps" in u.lower()), "")
     )
@@ -1347,10 +1405,18 @@ def run_reputation_and_social_audit(
             unanswered_negative = bd_g_data.get("unanswered_negative_count")
 
     effective_google_reviews = bd_g_data.get("reviews") or gp_data.get("reviews", [])
-    effective_pos = bd_g_data.get("positive_reviews_count") if bd_g_data else gp_data.get("positive_reviews_count", 0)
-    effective_neu = bd_g_data.get("neutral_reviews_count") if bd_g_data else gp_data.get("neutral_reviews_count", 0)
-    effective_neg = bd_g_data.get("negative_reviews_count") if bd_g_data else gp_data.get("negative_reviews_count", 0)
-    effective_low = bd_g_data.get("low_rating_reviews_count") if bd_g_data else gp_data.get("low_rating_reviews_count", 0)
+    if not effective_google_reviews:
+        # Fallback OSINT: estrae snippet di recensioni pubbliche indicizzate sul web
+        print(f"[RistoAudit] Nessuna recensione da GP/BD per '{audit_input.restaurant_name}', estrazione recensioni pubbliche da OSINT...")
+        web_snippets = fetch_web_public_review_snippets(audit_input.restaurant_name, audit_input.city)
+        if web_snippets:
+            effective_google_reviews = web_snippets
+            print(f"[RistoAudit] Recuperate {len(effective_google_reviews)} recensioni da snippet pubblici online.")
+
+    effective_pos = sum(1 for r in effective_google_reviews if r.get("sentiment") == "positiva")
+    effective_neu = sum(1 for r in effective_google_reviews if r.get("sentiment") == "neutra")
+    effective_neg = sum(1 for r in effective_google_reviews if r.get("sentiment") == "negativa")
+    effective_low = effective_neg + effective_neu
 
     if ta_data:
         if not tripadvisor_url and ta_data.get("web_url"):

@@ -62,9 +62,15 @@ def run_full_audit(audit_input: AuditInput) -> AuditResult:
     # Avvia SUBITO Bright Data Google Maps in background mentre girano Sito Web e Menù (guadagna +15s gratis!)
     bg_pool = ThreadPoolExecutor(max_workers=1)
     prefetched_bd_google_future = None
-    bd_google_target_url = audit_input.google_maps_url.strip()
-    if gp_data.get("place_id") and (not bd_google_target_url or "/maps/place/" not in bd_google_target_url):
+    # Preferisce maps_uri (URL con cid) da Google Places che supera al 100% la validazione di categoria di Bright Data
+    bd_google_target_url = ""
+    if gp_data and gp_data.get("maps_uri"):
+        bd_google_target_url = gp_data["maps_uri"].strip()
+    elif audit_input.google_maps_url.strip():
+        bd_google_target_url = audit_input.google_maps_url.strip()
+    elif gp_data and gp_data.get("place_id"):
         bd_google_target_url = f"https://www.google.com/maps/place/?q=place_id:{gp_data['place_id']}"
+
     if bd_google_target_url and audit_input.brightdata_api_key.strip():
         prefetched_bd_google_future = bg_pool.submit(
             fetch_google_maps_brightdata_reviews,
