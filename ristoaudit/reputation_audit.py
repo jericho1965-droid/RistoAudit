@@ -632,12 +632,13 @@ def _parse_brightdata_payload(text_body: str) -> list[dict[str, Any]]:
 def fetch_google_maps_brightdata_reviews(
     google_maps_url: str,
     api_key: str = "",
-    limit_per_input: int = 25,
+    limit_per_input: int = 15,
+    max_wait_seconds: int = 68,
 ) -> dict[str, Any]:
-    """Recupera recensioni Google Maps (fino a 25) con stato risposta proprietario via Bright Data."""
+    """Recupera recensioni Google Maps recenti con stato risposta proprietario via Bright Data."""
     key = (api_key or "").strip() or os.environ.get("BRIGHTDATA_API_KEY", "").strip()
     url = (google_maps_url or "").strip()
-    if not key or not url or "google." not in url.lower() and "goo.gl" not in url.lower():
+    if not key or not url or ("google." not in url.lower() and "goo.gl" not in url.lower()):
         return {}
 
     # Usa /trigger (asincrono, risponde in <1s con snapshot_id -> nessun read timeout!)
@@ -650,9 +651,11 @@ def fetch_google_maps_brightdata_reviews(
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
     }
-    payload = [{"url": url, "days_limit": 60}]
+    # days_limit=30 rende lo snapshot molto piu' rapido sui ristoranti con centinaia di recensioni
+    payload = [{"url": url, "days_limit": 30}]
 
     rows: list[dict[str, Any]] = []
+    polls = max(5, int(max_wait_seconds // 4))
     try:
         with httpx.Client(verify=certifi.where(), timeout=15.0) as client:
             resp = client.post(trigger_url, headers=headers, json=payload)
@@ -660,7 +663,7 @@ def fetch_google_maps_brightdata_reviews(
                 snap = resp.json().get("snapshot_id")
                 if snap:
                     snap_url = f"https://api.brightdata.com/datasets/v3/snapshot/{snap}?format=json"
-                    for _ in range(13):
+                    for _ in range(polls):
                         time.sleep(4)
                         r_snap = client.get(snap_url, headers=headers)
                         if r_snap.status_code == 200:
@@ -670,7 +673,7 @@ def fetch_google_maps_brightdata_reviews(
                             print(f"[RistoAudit] Bright Data Google snapshot HTTP {r_snap.status_code}: {r_snap.text[:200]}")
                             break
                     if not rows:
-                        print(f"[RistoAudit] Bright Data Google snapshot {snap} non completato entro 52s")
+                        print(f"[RistoAudit] Bright Data Google snapshot {snap} non completato entro {polls * 4}s")
             else:
                 print(f"[RistoAudit] Bright Data Google Maps trigger HTTP {resp.status_code}: {resp.text[:250]}")
                 return {}
@@ -972,6 +975,7 @@ def run_reputation_and_social_audit(
     website_data: dict[str, Any],
     osint_data: dict[str, Any],
     gp_data: dict[str, Any] | None = None,
+    prefetched_bd_google_future: Any = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Aggrega e valuta lo stato dei canali social e delle recensioni."""
     site_socials = website_data.get("social_links_on_site", {})
@@ -1081,10 +1085,9 @@ def run_reputation_and_social_audit(
     fb_rev_data: dict[str, Any] = {}
 
     with ThreadPoolExecutor(max_workers=3) as pool:
-        fut_bd_g = (
-            pool.submit(fetch_google_maps_brightdata_reviews, google_maps_url, audit_input.brightdata_api_key)
-            if (google_maps_url and audit_input.brightdata_api_key.strip()) else None
-        )
+        fut_bd_g = prefetched_bd_google_future
+        if fut_bd_g is None and google_maps_url and audit_input.brightdata_api_key.strip():
+            fut_bd_g = pool.submit(fetch_google_maps_brightdata_reviews, google_maps_url, audit_input.brightdata_api_key)
         fut_ta = pool.submit(
             fetch_tripadvisor_terra_data,
             audit_input.restaurant_name,
@@ -1099,7 +1102,7 @@ def run_reputation_and_social_audit(
 
         if fut_bd_g:
             try:
-                bd_g_data = fut_bd_g.result(timeout=62)
+                bd_g_data = fut_bd_g.result(timeout=72)
             except Exception as exc:
                 print(f"[RistoAudit] Timeout/errore Bright Data Google: {exc}")
         try:

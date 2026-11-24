@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 
 from .models import AuditInput, AuditResult, CategoryScore, Finding
 from .ominis_bridge import run_ominis_recon
-from .reputation_audit import fetch_google_places_data, run_reputation_and_social_audit
+from .reputation_audit import (
+    fetch_google_maps_brightdata_reviews,
+    fetch_google_places_data,
+    run_reputation_and_social_audit,
+)
 from .website_audit import run_website_and_menu_audit
 
 
@@ -49,6 +54,16 @@ def run_full_audit(audit_input: AuditInput) -> AuditResult:
         if not audit_input.google_maps_url.strip() and gp_data.get("maps_uri"):
             audit_input.google_maps_url = gp_data["maps_uri"]
 
+    # Avvia SUBITO Bright Data Google Maps in background mentre girano Sito Web e Menù (guadagna +15s gratis!)
+    bg_pool = ThreadPoolExecutor(max_workers=1)
+    prefetched_bd_google_future = None
+    if audit_input.google_maps_url.strip() and audit_input.brightdata_api_key.strip():
+        prefetched_bd_google_future = bg_pool.submit(
+            fetch_google_maps_brightdata_reviews,
+            audit_input.google_maps_url.strip(),
+            audit_input.brightdata_api_key,
+        )
+
     # 1. Ricerca Web Approfondita PRIMA del sito web: scopre sito ufficiale, menu indicizzati, social e portali!
     osint_data = run_ominis_recon(
         restaurant_name=audit_input.restaurant_name,
@@ -76,12 +91,16 @@ def run_full_audit(audit_input: AuditInput) -> AuditResult:
     )
 
     # 3. Social + Recensioni & Reputazione
-    social_data, reviews_data = run_reputation_and_social_audit(
-        audit_input=audit_input,
-        website_data=website_data,
-        osint_data=osint_data,
-        gp_data=gp_data,
-    )
+    try:
+        social_data, reviews_data = run_reputation_and_social_audit(
+            audit_input=audit_input,
+            website_data=website_data,
+            osint_data=osint_data,
+            gp_data=gp_data,
+            prefetched_bd_google_future=prefetched_bd_google_future,
+        )
+    finally:
+        bg_pool.shutdown(wait=False)
     print(
         f"[RistoAudit] SUMMARY '{audit_input.restaurant_name}': "
         f"GP={reviews_data.get('google_places_api_used')}({len(gp_data.get('reviews') or [])}r) | "
