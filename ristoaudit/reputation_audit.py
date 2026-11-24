@@ -633,39 +633,41 @@ def fetch_google_maps_brightdata_reviews(
     google_maps_url: str,
     api_key: str = "",
     limit_per_input: int = 15,
-    max_wait_seconds: int = 150,
+    max_wait_seconds: int = 85,
 ) -> dict[str, Any]:
-    """Recupera recensioni Google Maps recenti con stato risposta proprietario via Bright Data."""
+    """Recupera recensioni Google Maps (con risposte proprietario) via Bright Data.
+
+    Usa il dataset rapido Google Maps Full Info (gd_m8ebnr0q2qlklc02fz) che completa
+    in ~20-35s e restituisce scheda completa + top_reviews, evitando i lunghi crawl di
+    migliaia di recensioni.
+    """
     key = (api_key or "").strip() or os.environ.get("BRIGHTDATA_API_KEY", "").strip()
     url = (google_maps_url or "").strip()
     if not key or not url or ("google." not in url.lower() and "goo.gl" not in url.lower()):
         return {}
 
-    # Usa /trigger (asincrono, risponde in <1s con snapshot_id -> nessun read timeout!)
     trigger_url = (
         "https://api.brightdata.com/datasets/v3/trigger"
-        "?dataset_id=gd_luzfs1dn2oa0teb81&include_errors=true&limit_per_input="
-        + str(limit_per_input)
+        "?dataset_id=gd_m8ebnr0q2qlklc02fz&include_errors=true"
     )
     headers = {
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
     }
-    # days_limit=90 copre gli ultimi 3 mesi; limit_per_input=15 ferma lo scraper a 15 recensioni
-    payload = [{"url": url, "days_limit": 90}]
+    payload = [{"url": url}]
 
     rows: list[dict[str, Any]] = []
-    polls = max(6, int(max_wait_seconds // 5))
+    polls = max(6, int(max_wait_seconds // 4))
     try:
         with httpx.Client(verify=certifi.where(), timeout=15.0) as client:
             resp = client.post(trigger_url, headers=headers, json=payload)
             if resp.status_code in (200, 202):
                 snap = resp.json().get("snapshot_id")
-                print(f"[RistoAudit] Bright Data Google trigger OK: snap={snap} url={url[:80]}")
+                print(f"[RistoAudit] Bright Data Google Place trigger OK: snap={snap} url={url[:80]}")
                 if snap:
                     snap_url = f"https://api.brightdata.com/datasets/v3/snapshot/{snap}?format=json"
                     for _ in range(polls):
-                        time.sleep(5)
+                        time.sleep(4)
                         r_snap = client.get(snap_url, headers=headers)
                         if r_snap.status_code == 200:
                             rows = _parse_brightdata_payload(r_snap.text)
@@ -674,7 +676,7 @@ def fetch_google_maps_brightdata_reviews(
                             print(f"[RistoAudit] Bright Data Google snapshot HTTP {r_snap.status_code}: {r_snap.text[:200]}")
                             break
                     if not rows:
-                        print(f"[RistoAudit] Bright Data Google snapshot {snap} non completato entro {polls * 5}s")
+                        print(f"[RistoAudit] Bright Data Google snapshot {snap} non completato entro {polls * 4}s")
             else:
                 print(f"[RistoAudit] Bright Data Google Maps trigger HTTP {resp.status_code}: {resp.text[:250]}")
                 return {}
@@ -686,11 +688,13 @@ def fetch_google_maps_brightdata_reviews(
     place_rating: float | None = None
     place_reviews_count: int | None = None
 
+    # Espande sia righe piatte sia array nested (top_reviews / reviews / reviews_data) di gd_m8ebnr0q2qlklc02fz
+    review_items: list[dict[str, Any]] = []
     for row in rows:
         if row.get("error") or row.get("error_code"):
             continue
         if place_rating is None:
-            pr = row.get("overall_rating") or row.get("place_rating") or row.get("rating_overall")
+            pr = row.get("rating") or row.get("overall_rating") or row.get("place_rating")
             try:
                 if pr is not None:
                     place_rating = float(pr)
@@ -704,25 +708,37 @@ def fetch_google_maps_brightdata_reviews(
             except (TypeError, ValueError):
                 pass
 
+        nested = row.get("top_reviews") or row.get("reviews") or row.get("reviews_data") or row.get("featured_reviews")
+        if isinstance(nested, list) and nested:
+            for item in nested[:limit_per_input]:
+                if isinstance(item, dict):
+                    review_items.append(item)
+        else:
+            review_items.append(row)
+
+    for row in review_items[:limit_per_input]:
         r_val = row.get("review_rating") if row.get("review_rating") is not None else row.get("rating")
         try:
             rating_int = int(round(float(r_val))) if r_val is not None else None
         except (TypeError, ValueError):
             rating_int = None
 
-        text = str(row.get("review") or row.get("review_text") or row.get("text") or "").strip()
+        text = str(
+            row.get("content") or row.get("review") or row.get("review_text") or row.get("text") or row.get("snippet") or ""
+        ).strip()
         if rating_int is None and not text:
             continue
 
         author = str(
-            row.get("reviewer_name") or row.get("author_name") or row.get("user_name") or row.get("author") or "Utente Google"
+            row.get("reviewer_name") or row.get("author_name") or row.get("user_name") or row.get("author") or row.get("reviewer") or "Utente Google"
         ).strip()
-        rel_time = str(row.get("review_date") or row.get("date") or row.get("published_at") or "")[:16]
+        rel_time = str(row.get("review_date") or row.get("date") or row.get("published_at") or row.get("relative_date") or "")[:16]
         owner_reply = (
             row.get("response_of_owner")
             or row.get("owner_response")
             or row.get("response_from_owner_text")
             or row.get("owner_answer")
+            or row.get("response")
             or row.get("reply")
         )
         has_reply = bool(str(owner_reply).strip()) if owner_reply else False
@@ -739,7 +755,7 @@ def fetch_google_maps_brightdata_reviews(
 
     if not reviews:
         if rows:
-            print(f"[RistoAudit] Bright Data Google: {len(rows)} righe ma 0 recensioni valide. Sample: {str(rows[0])[:220]}")
+            print(f"[RistoAudit] Bright Data Google: {len(rows)} righe ma 0 recensioni valide. Keys: {sorted(rows[0].keys())}")
         return {}
 
     print(f"[RistoAudit] Bright Data Google OK: {len(reviews)} recensioni (senza risposta: {sum(1 for r in reviews if not r['has_owner_reply'])})")
