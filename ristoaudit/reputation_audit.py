@@ -633,7 +633,7 @@ def fetch_google_maps_brightdata_reviews(
     google_maps_url: str,
     api_key: str = "",
     limit_per_input: int = 15,
-    max_wait_seconds: int = 68,
+    max_wait_seconds: int = 150,
 ) -> dict[str, Any]:
     """Recupera recensioni Google Maps recenti con stato risposta proprietario via Bright Data."""
     key = (api_key or "").strip() or os.environ.get("BRIGHTDATA_API_KEY", "").strip()
@@ -655,7 +655,7 @@ def fetch_google_maps_brightdata_reviews(
     payload = [{"url": url, "days_limit": 90}]
 
     rows: list[dict[str, Any]] = []
-    polls = max(5, int(max_wait_seconds // 4))
+    polls = max(6, int(max_wait_seconds // 5))
     try:
         with httpx.Client(verify=certifi.where(), timeout=15.0) as client:
             resp = client.post(trigger_url, headers=headers, json=payload)
@@ -665,7 +665,7 @@ def fetch_google_maps_brightdata_reviews(
                 if snap:
                     snap_url = f"https://api.brightdata.com/datasets/v3/snapshot/{snap}?format=json"
                     for _ in range(polls):
-                        time.sleep(4)
+                        time.sleep(5)
                         r_snap = client.get(snap_url, headers=headers)
                         if r_snap.status_code == 200:
                             rows = _parse_brightdata_payload(r_snap.text)
@@ -674,7 +674,7 @@ def fetch_google_maps_brightdata_reviews(
                             print(f"[RistoAudit] Bright Data Google snapshot HTTP {r_snap.status_code}: {r_snap.text[:200]}")
                             break
                     if not rows:
-                        print(f"[RistoAudit] Bright Data Google snapshot {snap} non completato entro {polls * 4}s")
+                        print(f"[RistoAudit] Bright Data Google snapshot {snap} non completato entro {polls * 5}s")
             else:
                 print(f"[RistoAudit] Bright Data Google Maps trigger HTTP {resp.status_code}: {resp.text[:250]}")
                 return {}
@@ -1111,7 +1111,7 @@ def run_reputation_and_social_audit(
 
         if fut_bd_g:
             try:
-                bd_g_data = fut_bd_g.result(timeout=72)
+                bd_g_data = fut_bd_g.result(timeout=160)
             except Exception as exc:
                 print(f"[RistoAudit] Timeout/errore Bright Data Google: {exc}")
         try:

@@ -8,12 +8,15 @@ import base64
 import hmac
 import json
 import os
+import threading
 import urllib.parse
+import uuid
 import webbrowser
 from dataclasses import asdict
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
@@ -31,6 +34,27 @@ jinja_env = Environment(
     loader=FileSystemLoader(str(TEMPLATES_DIR)),
     autoescape=select_autoescape(["html", "xml"]),
 )
+
+JOBS: dict[str, dict[str, Any]] = {}
+JOBS_LOCK = threading.Lock()
+
+
+def _run_audit_job(job_id: str, audit_input: AuditInput) -> None:
+    try:
+        result = run_full_audit(audit_input)
+        pdf_path = generate_pdf_report(result, REPORTS_DIR)
+        json_path = pdf_path.with_suffix(".json")
+        json_path.write_text(json.dumps(asdict(result), indent=2, ensure_ascii=False), encoding="utf-8")
+        with JOBS_LOCK:
+            JOBS[job_id].update({
+                "status": "done",
+                "result": result,
+                "pdf_filename": pdf_path.name,
+            })
+    except Exception as exc:
+        print(f"[RistoAudit] Errore job {job_id}: {exc}")
+        with JOBS_LOCK:
+            JOBS[job_id].update({"status": "error", "error": str(exc)})
 
 
 def _load_saved_settings() -> dict[str, str]:
@@ -176,6 +200,49 @@ class RistoAuditHandler(BaseHTTPRequestHandler):
             self.wfile.write(data)
             return
 
+        if path.startswith("/job/"):
+            job_id = path[len("/job/"):].strip("/")
+            with JOBS_LOCK:
+                job = JOBS.get(job_id)
+            if not job:
+                self.send_error(HTTPStatus.NOT_FOUND, "Analisi non trovata")
+                return
+            if job["status"] == "done":
+                self.send_response(HTTPStatus.SEE_OTHER)
+                self.send_header("Location", f"/result/{job_id}")
+                self.end_headers()
+                return
+            tpl = jinja_env.get_template("loading.html")
+            self._send_html(tpl.render(
+                job_id=job_id,
+                restaurant_name=job.get("restaurant_name", ""),
+                city=job.get("city", ""),
+            ))
+            return
+
+        if path.startswith("/status/"):
+            job_id = path[len("/status/"):].strip("/")
+            with JOBS_LOCK:
+                job = JOBS.get(job_id)
+            if not job:
+                self._send_json({"status": "error", "error": "Job non trovato"}, status=404)
+                return
+            self._send_json({"status": job["status"], "error": job.get("error", "")})
+            return
+
+        if path.startswith("/result/"):
+            job_id = path[len("/result/"):].strip("/")
+            with JOBS_LOCK:
+                job = JOBS.get(job_id)
+            if not job or job["status"] != "done":
+                self.send_response(HTTPStatus.SEE_OTHER)
+                self.send_header("Location", f"/job/{job_id}" if job else "/")
+                self.end_headers()
+                return
+            tpl = jinja_env.get_template("result.html")
+            self._send_html(tpl.render(result=job["result"], pdf_filename=job["pdf_filename"]))
+            return
+
         if path.startswith("/download/"):
             filename = urllib.parse.unquote(path[len("/download/"):])
             if "/" in filename or "\\" in filename or ".." in filename or not filename.endswith(".pdf"):
@@ -274,14 +341,20 @@ class RistoAuditHandler(BaseHTTPRequestHandler):
             deep_link_check=_form_bool(params, "deep_link_check", default=True),
         )
 
-        result = run_full_audit(audit_input)
-        pdf_path = generate_pdf_report(result, REPORTS_DIR)
+        job_id = uuid.uuid4().hex[:12]
+        with JOBS_LOCK:
+            JOBS[job_id] = {
+                "status": "running",
+                "restaurant_name": restaurant_name,
+                "city": city,
+                "error": "",
+            }
+        threading.Thread(target=_run_audit_job, args=(job_id, audit_input), daemon=True).start()
 
-        json_path = pdf_path.with_suffix(".json")
-        json_path.write_text(json.dumps(asdict(result), indent=2, ensure_ascii=False), encoding="utf-8")
-
-        tpl = jinja_env.get_template("result.html")
-        self._send_html(tpl.render(result=result, pdf_filename=pdf_path.name))
+        self.send_response(HTTPStatus.SEE_OTHER)
+        self.send_header("Location", f"/job/{job_id}")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
 
 def main() -> None:
