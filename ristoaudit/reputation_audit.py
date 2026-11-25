@@ -1036,7 +1036,7 @@ def fetch_google_maps_brightdata_reviews(
 def fetch_facebook_brightdata_reviews(
     facebook_url: str,
     api_key: str = "",
-    num_of_reviews: int = 15,
+    num_of_reviews: int = 50,
 ) -> dict[str, Any]:
     """Recupera e classifica le recensioni Facebook tramite Bright Data Datasets API."""
     key = (api_key or "").strip() or os.environ.get("BRIGHTDATA_API_KEY", "").strip()
