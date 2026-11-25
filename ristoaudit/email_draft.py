@@ -137,6 +137,7 @@ def generate_outreach_email(result: AuditResult) -> dict[str, str]:
         "Luca Perini",
         "Titolare — Take'n'Go",
         "Sistemi di Informatizzazione per la Ristorazione | RistoAudit",
+        "email: lperini@takengo.it - cell: 3382244854"
     ]
     if consultant_contact:
         signature_lines.append(consultant_contact)
