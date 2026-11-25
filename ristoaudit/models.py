@@ -94,5 +94,6 @@ class AuditResult:
     action_plan: dict[str, list[str]] = field(default_factory=dict)
     swot_analysis: dict[str, list[str]] = field(default_factory=dict)
     market_analysis: dict[str, Any] = field(default_factory=dict)
+    email_draft: dict[str, str] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
 

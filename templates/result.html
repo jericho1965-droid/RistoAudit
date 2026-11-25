@@ -86,8 +86,36 @@
     }
     .btn-pdf { background: var(--accent); color: #fff; }
     .btn-pdf:hover { background: #9a3412; }
+    .btn-email { background: #1e293b; color: #fff; border: none; cursor: pointer; }
+    .btn-email:hover { background: #0f172a; }
+    .btn-copy { background: #0f766e; color: #fff; border: none; cursor: pointer; }
+    .btn-copy:hover { background: #115e59; }
+    .btn-sm { padding: 8px 14px; font-size: 0.86rem; border-radius: 7px; }
     .btn-back { background: #fff; color: var(--dark); border: 1px solid #cbd5e1; }
     .btn-back:hover { background: #f8fafc; }
+    .email-field {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid #cbd5e1;
+      border-radius: 8px;
+      font-family: inherit;
+      font-size: 0.92rem;
+      color: var(--dark);
+      background: #fff;
+    }
+    .email-textarea {
+      width: 100%;
+      min-height: 360px;
+      padding: 14px;
+      border: 1px solid #cbd5e1;
+      border-radius: 8px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-size: 0.9rem;
+      line-height: 1.55;
+      color: var(--dark);
+      background: #fff;
+      resize: vertical;
+    }
 
     .card {
       background: #fff;
@@ -180,7 +208,12 @@
   <main class="container" style="padding-bottom: 50px;">
     <div class="actions-bar">
       <a class="btn btn-back" href="/">← Nuovo Audit</a>
-      <a class="btn btn-pdf" href="/download/{{ pdf_filename }}">📥 Scarica Report PDF Completo</a>
+      <div style="display:flex; gap:10px; flex-wrap:wrap;">
+        {% if result.email_draft %}
+        <a class="btn btn-email" href="#email-draft-card">✉️ Bozza Email Ristoratore</a>
+        {% endif %}
+        <a class="btn btn-pdf" href="/download/{{ pdf_filename }}">📥 Scarica Report PDF Completo</a>
+      </div>
     </div>
 
     <section class="card" style="background:#fff7ed; border-color:#fdba74;">
@@ -197,6 +230,64 @@
       <h2>Sintesi Esecutiva</h2>
       <div class="exec-summary">{{ result.executive_summary }}</div>
     </section>
+
+    {% if result.email_draft %}
+    <section class="card" id="email-draft-card" style="border: 2px solid #cbd5e1; background: #f8fafc;">
+      <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; border-bottom:1px solid var(--border); padding-bottom:10px; margin-bottom:14px;">
+        <h2 style="margin:0; border:none; padding:0;">✉️ Bozza Email per il Ristoratore (Pronta all'Invio)</h2>
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <button type="button" class="btn btn-copy btn-sm" id="btn-copy-email" onclick="copyEmailDraft()">📋 Copia Testo Email</button>
+          <button type="button" class="btn btn-email btn-sm" onclick="openMailClient()">✉️ Apri nel Client Email</button>
+          {% if email_filename %}
+          <a class="btn btn-back btn-sm" href="/download-email/{{ email_filename }}">📄 Scarica Bozza (.txt)</a>
+          {% endif %}
+        </div>
+      </div>
+
+      <p style="margin:0 0 12px; font-size:0.86rem; color:#475569;">
+        Bozza personalizzata sui risultati dell'audit, firmata <strong>Luca Perini — Take'n'Go</strong>. Puoi modificare liberamente oggetto e testo qui sotto prima di copiarla o aprirla nel tuo client email (ricordati di allegare il file <code>{{ pdf_filename }}</code>).
+      </p>
+
+      <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap:10px; margin-bottom:10px;">
+        <div>
+          <label for="email-to" style="display:block; font-size:0.8rem; font-weight:700; color:#475569; margin-bottom:4px;">Destinatario (email del ristorante, se rilevata o da inserire)</label>
+          <input type="email" id="email-to" class="email-field" value="{{ result.email_draft.recipient_email }}" placeholder="es. info@ristorante.it">
+        </div>
+        <div>
+          <label for="email-subject" style="display:block; font-size:0.8rem; font-weight:700; color:#475569; margin-bottom:4px;">Oggetto Email <button type="button" onclick="copyEmailSubject()" id="btn-copy-subj" style="margin-left:6px; font-size:0.75rem; padding:1px 7px; border-radius:4px; border:1px solid #cbd5e1; background:#fff; cursor:pointer;">Copia oggetto</button></label>
+          <input type="text" id="email-subject" class="email-field" value="{{ result.email_draft.subject }}">
+        </div>
+      </div>
+
+      <label for="email-body" style="display:block; font-size:0.8rem; font-weight:700; color:#475569; margin-bottom:4px;">Testo Email</label>
+      <textarea id="email-body" class="email-textarea">{{ result.email_draft.body }}</textarea>
+
+      <script>
+        function copyEmailSubject() {
+          const el = document.getElementById('email-subject');
+          navigator.clipboard.writeText(el.value).then(() => {
+            const btn = document.getElementById('btn-copy-subj');
+            btn.textContent = '✓ Copiato!';
+            setTimeout(() => { btn.textContent = 'Copia oggetto'; }, 2000);
+          });
+        }
+        function copyEmailDraft() {
+          const body = document.getElementById('email-body').value;
+          navigator.clipboard.writeText(body).then(() => {
+            const btn = document.getElementById('btn-copy-email');
+            btn.textContent = '✓ Email copiata!';
+            setTimeout(() => { btn.textContent = '📋 Copia Testo Email'; }, 2500);
+          });
+        }
+        function openMailClient() {
+          const to = encodeURIComponent((document.getElementById('email-to').value || '').trim());
+          const subj = encodeURIComponent(document.getElementById('email-subject').value || '');
+          const body = encodeURIComponent(document.getElementById('email-body').value || '');
+          window.location.href = `mailto:${to}?subject=${subj}&body=${body}`;
+        }
+      </script>
+    </section>
+    {% endif %}
 
     <section class="card">
       <h2>Punteggio per Area</h2>

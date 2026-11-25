@@ -26,6 +26,7 @@ from ristoaudit.city_restaurants import (
     get_city_restaurants,
     update_restaurant_in_city_cache,
 )
+from ristoaudit.email_draft import save_email_draft
 from ristoaudit.models import AuditInput
 from ristoaudit.pdf_report import generate_pdf_report
 from ristoaudit.scoring import run_full_audit
@@ -49,6 +50,7 @@ def _run_audit_job(job_id: str, audit_input: AuditInput) -> None:
     try:
         result = run_full_audit(audit_input)
         pdf_path = generate_pdf_report(result, REPORTS_DIR)
+        email_path = save_email_draft(result, REPORTS_DIR, pdf_path.stem)
         json_path = pdf_path.with_suffix(".json")
         json_path.write_text(json.dumps(asdict(result), indent=2, ensure_ascii=False), encoding="utf-8")
         with JOBS_LOCK:
@@ -56,6 +58,7 @@ def _run_audit_job(job_id: str, audit_input: AuditInput) -> None:
                 "status": "done",
                 "result": result,
                 "pdf_filename": pdf_path.name,
+                "email_filename": email_path.name,
             })
     except Exception as exc:
         print(f"[RistoAudit] Errore job {job_id}: {exc}")
@@ -262,7 +265,11 @@ class RistoAuditHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
             tpl = jinja_env.get_template("result.html")
-            self._send_html(tpl.render(result=job["result"], pdf_filename=job["pdf_filename"]))
+            self._send_html(tpl.render(
+                result=job["result"],
+                pdf_filename=job["pdf_filename"],
+                email_filename=job.get("email_filename", ""),
+            ))
             return
 
         if path.startswith("/download-data/"):
@@ -284,6 +291,24 @@ class RistoAuditHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(content)))
             self.end_headers()
             self.wfile.write(content)
+            return
+
+        if path.startswith("/download-email/"):
+            filename = urllib.parse.unquote(path[len("/download-email/"):])
+            if "/" in filename or "\\" in filename or ".." in filename or not filename.endswith(".txt"):
+                self.send_error(HTTPStatus.BAD_REQUEST, "Nome file non valido")
+                return
+            email_file = REPORTS_DIR / filename
+            if not email_file.exists():
+                self.send_error(HTTPStatus.NOT_FOUND, "Bozza email non trovata")
+                return
+            data = email_file.read_bytes()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
             return
 
         if path.startswith("/download/"):

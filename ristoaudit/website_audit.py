@@ -427,10 +427,20 @@ def run_website_and_menu_audit(
                         soup.find("a", href=re.compile(r"^tel:", re.I))
                         or re.search(r"(\+39\s*)?0\d{1,3}[\s.-]?\d{5,8}|\b3\d{2}[\s.-]?\d{6,7}\b", body_text)
                     )
-                    site["has_email"] = bool(
-                        soup.find("a", href=re.compile(r"^mailto:", re.I))
-                        or re.search(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", body_text)
-                    )
+                    mailto_tag = soup.find("a", href=re.compile(r"^mailto:", re.I))
+                    found_email = ""
+                    if mailto_tag and mailto_tag.get("href"):
+                        cand = str(mailto_tag["href"]).split(":", 1)[1].split("?")[0].strip()
+                        if "@" in cand and "." in cand.split("@")[-1]:
+                            found_email = cand
+                    if not found_email:
+                        for em in re.findall(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", body_text):
+                            low_em = em.lower()
+                            if not any(bad in low_em for bad in ("example.", "sentry.", "wixpress.", ".png", ".jpg", ".webp")):
+                                found_email = em
+                                break
+                    site["has_email"] = bool(found_email or mailto_tag)
+                    site["contact_email"] = found_email
                     site["has_maps_embed"] = bool(
                         "maps.google" in low_html or "google.com/maps" in low_html or "goo.gl/maps" in low_html
                     )

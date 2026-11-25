@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 
 from .models import AuditInput, AuditResult, CategoryScore, Finding
+from .email_draft import generate_outreach_email
 from .competitor_analysis import (
     calculate_market_share,
     fetch_nearby_competitors,
@@ -1148,7 +1149,7 @@ def run_full_audit(audit_input: AuditInput) -> AuditResult:
         "Threats (Minacce e Competitor)": swot_threats,
     }
 
-    return AuditResult(
+    result = AuditResult(
         audit_id=audit_id,
         input_data=asdict(audit_input),
         overall_score=overall_score,
@@ -1171,3 +1172,5 @@ def run_full_audit(audit_input: AuditInput) -> AuditResult:
         market_analysis=market_analysis,
         warnings=warnings,
     )
+    result.email_draft = generate_outreach_email(result)
+    return result
