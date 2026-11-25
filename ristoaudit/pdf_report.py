@@ -475,12 +475,16 @@ def generate_pdf_report(result: AuditResult, output_dir: Path | str) -> Path:
             score_txt = rec.get("score_str", f"{score_val}/5")
             if rec.get("days_ago") is not None:
                 d_ago = rec["days_ago"]
+                raw_d = str(rec.get("last_date") or "")[:10]
+                d_fmt = ""
+                if len(raw_d) == 10 and raw_d[4] == "-":
+                    d_fmt = f"{raw_d[8:10]}/{raw_d[5:7]}/{raw_d[0:4]} • "
                 if d_ago <= 7:
-                    time_txt = f"Ultima settimana ({d_ago} gg fa)"
+                    time_txt = f"{d_fmt}Ultima settimana ({d_ago} gg fa)"
                 elif d_ago <= 35:
-                    time_txt = f"{rec.get('weeks_ago', 2)} sett. fa ({d_ago} gg)"
+                    time_txt = f"{d_fmt}{rec.get('weeks_ago', 2)} sett. fa ({d_ago} gg)"
                 else:
-                    time_txt = f"Oltre 5 sett. fa ({rec.get('weeks_ago', 5)} sett.)"
+                    time_txt = f"{d_fmt}Oltre 5 sett. fa ({rec.get('weeks_ago', 5)} sett.)"
             else:
                 time_txt = rec.get("status_label") or "Data non pubblica"
         else:

@@ -81,8 +81,66 @@ _IT_EN_MONTHS = {
 }
 
 
+def _parse_relative_date(text: str) -> str | None:
+    """Converte espressioni relative come '5 days ago', '2 settimane fa', '3h' in YYYY-MM-DD."""
+    if not text:
+        return None
+    t = text.lower().strip()
+    from datetime import timedelta
+
+    # Patterns: "5 days ago", "2 weeks ago", "3 hours ago", "1 month ago"
+    # IT: "5 giorni fa", "2 settimane fa", "3 ore fa", "1 mese fa"
+    # Also: "5d", "2w", "3h", "1m" (compact social media format)
+    # Also: "yesterday" / "ieri", "today" / "oggi"
+
+    if t in ("today", "oggi", "just now", "ora", "adesso", "now"):
+        return datetime.now().strftime("%Y-%m-%d")
+    if t in ("yesterday", "ieri"):
+        return (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    # Relative units map
+    _units = {
+        "second": 1/86400, "seconds": 1/86400, "sec": 1/86400, "s": 1/86400,
+        "secondo": 1/86400, "secondi": 1/86400,
+        "minute": 1/1440, "minutes": 1/1440, "min": 1/1440,
+        "minuto": 1/1440, "minuti": 1/1440,
+        "hour": 1/24, "hours": 1/24, "hr": 1/24, "hrs": 1/24, "h": 1/24,
+        "ora": 1/24, "ore": 1/24,
+        "day": 1, "days": 1, "d": 1,
+        "giorno": 1, "giorni": 1, "gg": 1,
+        "week": 7, "weeks": 7, "w": 7,
+        "settimana": 7, "settimane": 7, "sett": 7,
+        "month": 30, "months": 30, "mo": 30,
+        "mese": 30, "mesi": 30,
+        "year": 365, "years": 365, "yr": 365, "yrs": 365, "y": 365,
+        "anno": 365, "anni": 365,
+    }
+
+    # Pattern: "<N> <unit> ago" or "<N> <unit> fa"
+    m = re.search(r"(\d+)\s*([a-z]+)\s*(?:ago|fa)", t)
+    if m:
+        num = int(m.group(1))
+        unit = m.group(2).rstrip(".")
+        multiplier = _units.get(unit)
+        if multiplier is not None:
+            days = max(0, int(num * multiplier))
+            return (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+
+    # Compact format: "5d", "2w", "3h" (no "ago"/"fa")
+    m2 = re.match(r"^(\d+)\s*([dhwmy])$", t)
+    if m2:
+        num = int(m2.group(1))
+        unit = m2.group(2)
+        multiplier = _units.get(unit, 1)
+        days = max(0, int(num * multiplier))
+        return (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+
+    return None
+
+
 def _extract_date_from_text(text: str) -> str | None:
-    """Estrae una data YYYY-MM-DD da testi, snippet o metadati in italiano o inglese."""
+    """Estrae una data YYYY-MM-DD da testi, snippet o metadati in italiano o inglese.
+    Supporta anche espressioni relative come '5 days ago', '2 settimane fa'."""
     if not text:
         return None
     # 1. Match ISO YYYY-MM-DD
@@ -110,10 +168,18 @@ def _extract_date_from_text(text: str) -> str | None:
         y_val = m_str2.group(3)
         m_num = _IT_EN_MONTHS.get(m_name, 1)
         return f"{y_val}-{str(m_num).zfill(2)}-{d_val}"
+    # 4. Relative dates: "5 days ago", "2 settimane fa", "3h", etc.
+    rel = _parse_relative_date(text)
+    if rel:
+        return rel
     return None
 
 
-def compute_social_recency_score(days_ago: int | None, present: bool) -> dict[str, Any]:
+def compute_social_recency_score(
+    days_ago: int | None,
+    present: bool,
+    last_date: str = "",
+) -> dict[str, Any]:
     """Calcola il voto di attività/recency (0-5) in base al tempo passato dall'ultimo post:
     - Ultima settimana (<= 7 gg): 5 punti su 5 (5/5)
     - 2 settimane fa (8-14 gg): 4 punti su 5 (4/5)
@@ -123,6 +189,14 @@ def compute_social_recency_score(days_ago: int | None, present: bool) -> dict[st
     - 5 settimane o più fa (>= 35 gg): 0 punti su 5 (0/5)
     - Profilo assente: 0/5
     """
+    date_it = ""
+    if last_date and len(last_date) >= 10:
+        try:
+            date_it = datetime.strptime(last_date[:10], "%Y-%m-%d").strftime("%d/%m/%Y")
+        except ValueError:
+            date_it = last_date[:10]
+    date_prefix = f"Ultimo post del {date_it} • " if date_it else ""
+
     if not present:
         return {
             "score": 0,
@@ -158,11 +232,11 @@ def compute_social_recency_score(days_ago: int | None, present: bool) -> dict[st
             "score_num": 5,
             "weeks_ago": 1,
             "days_ago": days_ago,
-            "last_date": "",
+            "last_date": last_date,
             "label": f"5/5 (Ultima settimana • {days_ago} gg fa)",
             "status_code": "ottimo",
             "is_critical": False,
-            "description": f"Post o interazione rilevata nell'ultima settimana ({days_ago} giorni fa).",
+            "description": f"{date_prefix}Post rilevato nell'ultima settimana ({days_ago} giorni fa).",
         }
     elif days_ago <= 14:
         return {
@@ -171,11 +245,11 @@ def compute_social_recency_score(days_ago: int | None, present: bool) -> dict[st
             "score_num": 4,
             "weeks_ago": 2,
             "days_ago": days_ago,
-            "last_date": "",
+            "last_date": last_date,
             "label": f"4/5 (2 settimane fa • {days_ago} gg)",
             "status_code": "buono",
             "is_critical": False,
-            "description": f"Ultima attività rilevata 2 settimane fa ({days_ago} giorni fa).",
+            "description": f"{date_prefix}Ultima attività rilevata 2 settimane fa ({days_ago} giorni fa).",
         }
     elif days_ago <= 21:
         return {
@@ -184,11 +258,11 @@ def compute_social_recency_score(days_ago: int | None, present: bool) -> dict[st
             "score_num": 3,
             "weeks_ago": 3,
             "days_ago": days_ago,
-            "last_date": "",
+            "last_date": last_date,
             "label": f"3/5 (3 settimane fa • {days_ago} gg)",
             "status_code": "moderato",
             "is_critical": False,
-            "description": f"Ultima attività rilevata 3 settimane fa ({days_ago} giorni fa).",
+            "description": f"{date_prefix}Ultima attività rilevata 3 settimane fa ({days_ago} giorni fa).",
         }
     elif days_ago <= 28:
         return {
@@ -197,11 +271,11 @@ def compute_social_recency_score(days_ago: int | None, present: bool) -> dict[st
             "score_num": 2,
             "weeks_ago": 4,
             "days_ago": days_ago,
-            "last_date": "",
+            "last_date": last_date,
             "label": f"2/5 (4 settimane fa • {days_ago} gg)",
             "status_code": "discontinuo",
             "is_critical": True,
-            "description": f"Ultima attività rilevata 4 settimane fa ({days_ago} giorni fa).",
+            "description": f"{date_prefix}Ultima attività rilevata 4 settimane fa ({days_ago} giorni fa).",
         }
     elif days_ago <= 35:
         return {
@@ -210,11 +284,11 @@ def compute_social_recency_score(days_ago: int | None, present: bool) -> dict[st
             "score_num": 1,
             "weeks_ago": 5,
             "days_ago": days_ago,
-            "last_date": "",
+            "last_date": last_date,
             "label": f"1/5 (5 settimane fa • {days_ago} gg)",
             "status_code": "critico",
             "is_critical": True,
-            "description": f"Ultima attività rilevata 5 settimane fa ({days_ago} giorni fa).",
+            "description": f"{date_prefix}Ultima attività rilevata 5 settimane fa ({days_ago} giorni fa).",
         }
     else:
         return {
@@ -223,11 +297,11 @@ def compute_social_recency_score(days_ago: int | None, present: bool) -> dict[st
             "score_num": 0,
             "weeks_ago": weeks,
             "days_ago": days_ago,
-            "last_date": "",
+            "last_date": last_date,
             "label": f"0/5 (Oltre 5 settimane fa • {weeks} sett.)",
             "status_code": "critico",
             "is_critical": True,
-            "description": f"Profilo fermo da oltre 5 settimane ({weeks} settimane fa • {days_ago} giorni fa).",
+            "description": f"{date_prefix}Profilo fermo da oltre 5 settimane ({weeks} settimane fa • {days_ago} giorni fa).",
         }
 
 
@@ -1246,6 +1320,320 @@ def fetch_facebook_public_reviews(facebook_url: str) -> dict[str, Any]:
     return result
 
 
+def _scrape_facebook_latest_post_date(facebook_url: str) -> str | None:
+    """Scrape la pagina pubblica Facebook per trovare la data dell'ultimo post.
+    Cerca nei tag <time>, <abbr>, meta og:updated_time e testi relativi."""
+    base = (facebook_url or "").strip().split("?")[0].rstrip("/")
+    if not base or "facebook.com" not in base.lower():
+        return None
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "en-US,en;q=0.9,it;q=0.8",
+    }
+    dates: list[str] = []
+    try:
+        with httpx.Client(verify=_get_ssl_verify(), follow_redirects=True, timeout=10.0, headers=headers) as client:
+            for target_url in (base, f"{base}/posts/"):
+                try:
+                    r = client.get(target_url)
+                    if r.status_code != 200:
+                        continue
+                    html = r.text[:500_000]
+                    soup = BeautifulSoup(html, "lxml")
+
+                    # 1. <time datetime="..."> or <abbr data-utime="...">
+                    for tag in soup.find_all("time"):
+                        dt_val = tag.get("datetime") or tag.get("content") or tag.get_text()
+                        if dt_val:
+                            parsed = _extract_date_from_text(str(dt_val))
+                            if parsed:
+                                dates.append(parsed)
+                    for tag in soup.find_all("abbr"):
+                        utime = tag.get("data-utime")
+                        if utime:
+                            try:
+                                from datetime import timezone
+                                dt_obj = datetime.fromtimestamp(int(utime), tz=timezone.utc)
+                                dates.append(dt_obj.strftime("%Y-%m-%d"))
+                            except Exception:
+                                pass
+
+                    # 2. og:updated_time meta
+                    og_time = soup.find("meta", attrs={"property": "og:updated_time"})
+                    if og_time and og_time.get("content"):
+                        parsed = _extract_date_from_text(str(og_time["content"]))
+                        if parsed:
+                            dates.append(parsed)
+
+                    # 3. JSON-LD datePublished/dateModified
+                    for script in soup.find_all("script", type="application/ld+json"):
+                        try:
+                            ld = json.loads(script.string or "")
+                            for key in ("datePublished", "dateModified", "dateCreated", "uploadDate"):
+                                val = ld.get(key) if isinstance(ld, dict) else None
+                                if val:
+                                    parsed = _extract_date_from_text(str(val))
+                                    if parsed:
+                                        dates.append(parsed)
+                        except Exception:
+                            pass
+
+                    # 4. Search for relative dates in text near post areas
+                    text_body = soup.get_text(separator=" ")
+                    # Look for patterns like "5 hours ago", "2 days ago", "1d", "3h"
+                    for m in re.finditer(r"\b(\d+)\s*(hours?|hrs?|h|days?|d|minutes?|mins?|weeks?|w|ore|giorni?|gg|settimane?|sett|minuti?|mesi?|months?)\s*(?:ago|fa)\b", text_body, re.I):
+                        rel_text = m.group(0)
+                        parsed = _parse_relative_date(rel_text)
+                        if parsed:
+                            dates.append(parsed)
+
+                    if dates:
+                        break
+                except Exception:
+                    continue
+    except Exception as exc:
+        print(f"[RistoAudit] Errore scraping Facebook posts: {exc}")
+
+    if dates:
+        best = max(dates)
+        print(f"[RistoAudit] Facebook post date scraped: {best} (da {len(dates)} date trovate)")
+        return best
+    return None
+
+
+def _scrape_instagram_latest_post_date(instagram_url: str) -> str | None:
+    """Scrape la pagina pubblica Instagram per trovare la data dell'ultimo post.
+    Cerca nei tag <time>, JSON-LD e testi relativi nel profilo."""
+    base = (instagram_url or "").strip().split("?")[0].rstrip("/")
+    if not base or "instagram.com" not in base.lower():
+        return None
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    dates: list[str] = []
+    try:
+        with httpx.Client(verify=_get_ssl_verify(), follow_redirects=True, timeout=10.0, headers=headers) as client:
+            r = client.get(base)
+            if r.status_code == 200:
+                html = r.text[:500_000]
+                soup = BeautifulSoup(html, "lxml")
+
+                # 1. <time datetime="...">
+                for tag in soup.find_all("time"):
+                    dt_val = tag.get("datetime") or tag.get_text()
+                    if dt_val:
+                        parsed = _extract_date_from_text(str(dt_val))
+                        if parsed:
+                            dates.append(parsed)
+
+                # 2. JSON-LD and embedded JSON
+                for script in soup.find_all("script", type="application/ld+json"):
+                    try:
+                        ld = json.loads(script.string or "")
+                        for key in ("datePublished", "dateModified", "dateCreated", "uploadDate"):
+                            val = ld.get(key) if isinstance(ld, dict) else None
+                            if val:
+                                parsed = _extract_date_from_text(str(val))
+                                if parsed:
+                                    dates.append(parsed)
+                    except Exception:
+                        pass
+
+                # 3. SharedData JSON blob (Instagram embeds post data in window._sharedData)
+                for script in soup.find_all("script"):
+                    s_text = script.string or ""
+                    if "window._sharedData" in s_text or "window.__additionalDataLoaded" in s_text:
+                        # Extract timestamps from taken_at or taken_at_timestamp
+                        for m in re.finditer(r'"taken_at(?:_timestamp)?"\s*:\s*(\d{10,13})', s_text):
+                            try:
+                                ts = int(m.group(1))
+                                if ts > 1e12:
+                                    ts = ts // 1000
+                                from datetime import timezone
+                                dt_obj = datetime.fromtimestamp(ts, tz=timezone.utc)
+                                dates.append(dt_obj.strftime("%Y-%m-%d"))
+                            except Exception:
+                                pass
+
+                # 4. Relative dates from page text ("5 days ago", "2d", etc.)
+                text_body = soup.get_text(separator=" ")
+                for m in re.finditer(r"\b(\d+)\s*(hours?|hrs?|h|days?|d|minutes?|mins?|weeks?|w|ore|giorni?|gg|settimane?|sett|minuti?|mesi?|months?)\s*(?:ago|fa)\b", text_body, re.I):
+                    rel_text = m.group(0)
+                    parsed = _parse_relative_date(rel_text)
+                    if parsed:
+                        dates.append(parsed)
+    except Exception as exc:
+        print(f"[RistoAudit] Errore scraping Instagram posts: {exc}")
+
+    if dates:
+        best = max(dates)
+        print(f"[RistoAudit] Instagram post date scraped: {best} (da {len(dates)} date trovate)")
+        return best
+    return None
+
+
+def _normalize_social_profile_url(url: str, platform: str) -> str:
+    """Normalizza l'URL di un profilo Facebook o Instagram per Bright Data (senza query superflue o tab extra)."""
+    raw = (url or "").strip().split("#")[0]
+    if not raw:
+        return ""
+    parsed = urllib.parse.urlsplit(raw)
+    if platform == "facebook" and parsed.path.rstrip("/").lower().endswith("/profile.php"):
+        qs = urllib.parse.parse_qs(parsed.query)
+        pid = qs.get("id", [""])[0].strip()
+        if pid:
+            return f"{parsed.scheme or 'https'}://{parsed.netloc}/profile.php?id={pid}"
+    clean = f"{parsed.scheme or 'https'}://{parsed.netloc}{parsed.path}".rstrip("/")
+    if not parsed.netloc:
+        clean = raw.split("?")[0].rstrip("/")
+    if platform == "facebook":
+        for suffix in ("/reviews", "/about", "/photos", "/videos", "/posts", "/reels", "/mentions"):
+            if clean.lower().endswith(suffix):
+                clean = clean[: -len(suffix)]
+                break
+    elif platform == "instagram":
+        for suffix in ("/reels", "/tagged", "/channel", "/saved"):
+            if clean.lower().endswith(suffix):
+                clean = clean[: -len(suffix)]
+                break
+    return f"{clean}/"
+
+
+def _parse_post_date_value(val: Any) -> str | None:
+    """Normalizza un timestamp o stringa di pubblicazione post in YYYY-MM-DD (mai date future)."""
+    if val is None or val == "":
+        return None
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    parsed_str: str | None = None
+
+    # Unix timestamp (secondi o millisecondi)
+    if isinstance(val, (int, float)) or (isinstance(val, str) and val.strip().isdigit() and len(val.strip()) in (10, 13)):
+        try:
+            ts = int(float(val))
+            if ts > 1_000_000_000_000:
+                ts = ts // 1000
+            if 1_262_304_000 <= ts <= 2_200_000_000:
+                from datetime import timezone
+                parsed_str = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
+        except Exception:
+            pass
+    else:
+        s = str(val).strip()
+        try:
+            dt = date_parser.isoparse(s)
+            parsed_str = dt.strftime("%Y-%m-%d")
+        except Exception:
+            parsed_str = _extract_date_from_text(s) or _parse_relative_date(s)
+
+    if parsed_str and len(parsed_str) == 10 and "2010-01-01" <= parsed_str <= today_str:
+        return parsed_str
+    return None
+
+
+def _fetch_brightdata_social_posts(
+    url: str,
+    platform: str,
+    api_key: str = "",
+    num_of_posts: int = 5,
+    max_wait_seconds: int = 105,
+) -> str | None:
+    """Usa Bright Data Datasets API per recuperare la data reale dell'ultimo post da Facebook o Instagram.
+
+    Dataset ufficiali verificati:
+    - Facebook Pages Posts (by Profile URL): gd_lkaxegm826bjpoo9m5
+    - Instagram Posts (Discover by Profile URL): gd_lk5ns7kz21pck8jpis
+    """
+    key = (api_key or "").strip() or os.environ.get("BRIGHTDATA_API_KEY", "").strip()
+    clean_url = _normalize_social_profile_url(url, platform)
+    if not key or not clean_url:
+        return None
+
+    if platform == "facebook":
+        if "facebook.com" not in clean_url.lower():
+            return None
+        trigger_url = (
+            "https://api.brightdata.com/datasets/v3/trigger"
+            "?dataset_id=gd_lkaxegm826bjpoo9m5&include_errors=true"
+        )
+        payload = [{"url": clean_url, "num_of_posts": num_of_posts}]
+    elif platform == "instagram":
+        if "instagram.com" not in clean_url.lower():
+            return None
+        trigger_url = (
+            "https://api.brightdata.com/datasets/v3/trigger"
+            "?dataset_id=gd_lk5ns7kz21pck8jpis&type=discover_new&discover_by=url&include_errors=true"
+        )
+        payload = [{"url": clean_url, "num_of_posts": num_of_posts}]
+    else:
+        return None
+
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+    }
+    dates: list[str] = []
+    polls = max(15, int(max_wait_seconds // 3))
+
+    try:
+        with httpx.Client(verify=_get_ssl_verify(), timeout=15.0) as client:
+            resp = client.post(trigger_url, headers=headers, json=payload)
+            if resp.status_code in (200, 202):
+                snap = resp.json().get("snapshot_id")
+                print(f"[RistoAudit] Bright Data {platform} posts trigger OK: snap={snap} url={clean_url}")
+                if snap:
+                    snap_url = f"https://api.brightdata.com/datasets/v3/snapshot/{snap}?format=json"
+                    rows: list[dict[str, Any]] = []
+                    for _ in range(polls):
+                        time.sleep(3)
+                        r_snap = client.get(snap_url, headers=headers)
+                        if r_snap.status_code == 200:
+                            rows = _parse_brightdata_payload(r_snap.text)
+                            break
+                        if r_snap.status_code not in (202, 404):
+                            print(f"[RistoAudit] Bright Data {platform} posts snapshot HTTP {r_snap.status_code}: {r_snap.text[:200]}")
+                            break
+                    if not rows:
+                        print(f"[RistoAudit] Bright Data {platform} posts snapshot {snap} vuoto o non completato entro {polls * 3}s")
+                    for row in rows:
+                        if row.get("error") or row.get("error_code"):
+                            continue
+                        # IMPORTANTE: MAI usare 'timestamp' (e' la data di scraping di Bright Data = oggi!)
+                        # o 'page_creation_time' (data di creazione della pagina).
+                        for dk in (
+                            "date_posted",
+                            "post_date",
+                            "published_at",
+                            "taken_at",
+                            "taken_at_timestamp",
+                            "upload_date",
+                            "created_at",
+                            "date",
+                        ):
+                            parsed = _parse_post_date_value(row.get(dk))
+                            if parsed:
+                                dates.append(parsed)
+                                break
+            else:
+                print(f"[RistoAudit] Bright Data {platform} posts trigger HTTP {resp.status_code}: {resp.text[:250]}")
+    except Exception as exc:
+        print(f"[RistoAudit] Errore Bright Data {platform} posts: {exc}")
+
+    if dates:
+        best = max(dates)
+        print(f"[RistoAudit] Bright Data {platform} latest post date: {best} (su {len(dates)} post)")
+        return best
+    return None
+
+
 def run_reputation_and_social_audit(
     audit_input: AuditInput,
     website_data: dict[str, Any],
@@ -1355,16 +1743,20 @@ def run_reputation_and_social_audit(
         or next((u for u in web_review_urls if "google.com/maps" in u.lower()), "")
     )
 
-    # Esegue IN PARALLELO Bright Data (Google Maps + Facebook) e TripAdvisor Terra per restare sotto i 30-40s!
+    # Esegue IN PARALLELO Bright Data (Google Maps + Facebook Recensioni + Facebook Post + Instagram Post) e TripAdvisor Terra!
+    effective_bd_key = (audit_input.brightdata_api_key or "").strip() or os.environ.get("BRIGHTDATA_API_KEY", "").strip()
     fb_url = channels.get("facebook", {}).get("url", "")
+    ig_url = channels.get("instagram", {}).get("url", "")
     bd_g_data: dict[str, Any] = {}
     ta_data: dict[str, Any] = {}
     fb_rev_data: dict[str, Any] = {}
+    bd_fb_post_date: str | None = None
+    bd_ig_post_date: str | None = None
 
-    with ThreadPoolExecutor(max_workers=3) as pool:
+    with ThreadPoolExecutor(max_workers=5) as pool:
         fut_bd_g = prefetched_bd_google_future
-        if fut_bd_g is None and google_maps_url and audit_input.brightdata_api_key.strip():
-            fut_bd_g = pool.submit(fetch_google_maps_brightdata_reviews, google_maps_url, audit_input.brightdata_api_key)
+        if fut_bd_g is None and google_maps_url and effective_bd_key:
+            fut_bd_g = pool.submit(fetch_google_maps_brightdata_reviews, google_maps_url, effective_bd_key)
         fut_ta = pool.submit(
             fetch_tripadvisor_terra_data,
             audit_input.restaurant_name,
@@ -1373,8 +1765,16 @@ def run_reputation_and_social_audit(
             audit_input.tripadvisor_terra_api_key,
         )
         fut_fb = (
-            pool.submit(fetch_facebook_brightdata_reviews, fb_url, audit_input.brightdata_api_key)
-            if (fb_url and audit_input.brightdata_api_key.strip()) else None
+            pool.submit(fetch_facebook_brightdata_reviews, fb_url, effective_bd_key)
+            if (fb_url and effective_bd_key) else None
+        )
+        fut_bd_fb_posts = (
+            pool.submit(_fetch_brightdata_social_posts, fb_url, "facebook", effective_bd_key)
+            if (fb_url and effective_bd_key) else None
+        )
+        fut_bd_ig_posts = (
+            pool.submit(_fetch_brightdata_social_posts, ig_url, "instagram", effective_bd_key)
+            if (ig_url and effective_bd_key) else None
         )
 
         if fut_bd_g:
@@ -1391,6 +1791,16 @@ def run_reputation_and_social_audit(
                 fb_rev_data = fut_fb.result(timeout=62)
             except Exception as exc:
                 print(f"[RistoAudit] Timeout/errore Bright Data Facebook: {exc}")
+        if fut_bd_fb_posts:
+            try:
+                bd_fb_post_date = fut_bd_fb_posts.result(timeout=115)
+            except Exception as exc:
+                print(f"[RistoAudit] Timeout/errore Bright Data Facebook posts: {exc}")
+        if fut_bd_ig_posts:
+            try:
+                bd_ig_post_date = fut_bd_ig_posts.result(timeout=115)
+            except Exception as exc:
+                print(f"[RistoAudit] Timeout/errore Bright Data Instagram posts: {exc}")
 
     if fb_url and not fb_rev_data:
         fb_rev_data = fetch_facebook_public_reviews(fb_url)
@@ -1461,41 +1871,60 @@ def run_reputation_and_social_audit(
         effective_photos_count = None
 
     # --- SOCIAL RECENCY: Sistema di voto 0-5 per Instagram e Facebook ---
-    latest_fb_date: str | None = None
-    latest_ig_date: str | None = None
+    # 1. Fonte primaria: data reale degli ultimi post recuperati via Bright Data (FB Pages Posts & IG Posts)
+    latest_fb_date: str | None = bd_fb_post_date
+    latest_ig_date: str | None = bd_ig_post_date
 
-    # 1. Da recensioni/post Facebook (Bright Data restituisce date ISO o YYYY-MM-DD)
-    if fb_rev_data and fb_rev_data.get("reviews"):
-        fb_dates = []
-        for r in fb_rev_data["reviews"]:
-            raw = r.get("date")
-            if raw:
-                try:
-                    dt = date_parser.isoparse(str(raw))
-                    fb_dates.append(dt.strftime("%Y-%m-%d"))
-                except Exception:
-                    fb_dates.append(str(raw)[:10])
-        if fb_dates:
-            latest_fb_date = max(fb_dates)
-
-    # 2. Da search records e snippet web
+    # 2. Da search records e snippet web (supporta sia date esplicite sia relative come "5 days ago")
     for rec in osint_data.get("search_records", []):
         u = rec.get("url", "").lower()
         txt = f"{rec.get('title', '')} {rec.get('snippet', '')}"
-        extracted = _extract_date_from_text(txt)
+        extracted = _parse_post_date_value(_extract_date_from_text(txt))
         if extracted:
             if "facebook.com" in u and (not latest_fb_date or extracted > latest_fb_date):
                 latest_fb_date = extracted
             elif "instagram.com" in u and (not latest_ig_date or extracted > latest_ig_date):
                 latest_ig_date = extracted
 
-    # 3. Input manuale opzionale (override o fallback)
+    # 3. Fallback leggero solo per i canali rimasti senza data post
+    if (fb_url and not latest_fb_date) or (ig_url and not latest_ig_date):
+        with ThreadPoolExecutor(max_workers=2) as fallback_pool:
+            fut_scrape_fb = fallback_pool.submit(_scrape_facebook_latest_post_date, fb_url) if (fb_url and not latest_fb_date) else None
+            fut_scrape_ig = fallback_pool.submit(_scrape_instagram_latest_post_date, ig_url) if (ig_url and not latest_ig_date) else None
+            if fut_scrape_fb:
+                try:
+                    scraped_fb = _parse_post_date_value(fut_scrape_fb.result(timeout=15))
+                    if scraped_fb:
+                        latest_fb_date = scraped_fb
+                except Exception as exc:
+                    print(f"[RistoAudit] FB scrape fallback errore: {exc}")
+            if fut_scrape_ig:
+                try:
+                    scraped_ig = _parse_post_date_value(fut_scrape_ig.result(timeout=15))
+                    if scraped_ig:
+                        latest_ig_date = scraped_ig
+                except Exception as exc:
+                    print(f"[RistoAudit] IG scrape fallback errore: {exc}")
+
+    # 4. Ultimo fallback Facebook: date recensioni Facebook solo se non e' stato possibile leggere i post della pagina
+    if not latest_fb_date and fb_rev_data and fb_rev_data.get("reviews"):
+        fb_rev_dates = [
+            parsed for r in fb_rev_data["reviews"]
+            if (parsed := _parse_post_date_value(r.get("date")))
+        ]
+        if fb_rev_dates:
+            latest_fb_date = max(fb_rev_dates)
+
+    # 5. Input manuale opzionale (override o fallback)
     if audit_input.last_social_post_date.strip():
-        manual_d = audit_input.last_social_post_date.strip()
-        if not latest_fb_date or manual_d > latest_fb_date:
-            latest_fb_date = manual_d
-        if not latest_ig_date or manual_d > latest_ig_date:
-            latest_ig_date = manual_d
+        manual_d = _parse_post_date_value(audit_input.last_social_post_date.strip())
+        if manual_d:
+            if not latest_fb_date or manual_d > latest_fb_date:
+                latest_fb_date = manual_d
+            if not latest_ig_date or manual_d > latest_ig_date:
+                latest_ig_date = manual_d
+
+    print(f"[RistoAudit] Social recency dates - FB: {latest_fb_date}, IG: {latest_ig_date}")
 
     def _days_ago_from_str(d_str: str | None) -> int | None:
         if not d_str:
@@ -1509,12 +1938,10 @@ def run_reputation_and_social_audit(
     fb_days = _days_ago_from_str(latest_fb_date)
     ig_days = _days_ago_from_str(latest_ig_date)
 
-    fb_recency = compute_social_recency_score(fb_days, channels["facebook"]["present"])
-    fb_recency["last_date"] = latest_fb_date or ""
+    fb_recency = compute_social_recency_score(fb_days, channels["facebook"]["present"], last_date=latest_fb_date or "")
     channels["facebook"]["recency"] = fb_recency
 
-    ig_recency = compute_social_recency_score(ig_days, channels["instagram"]["present"])
-    ig_recency["last_date"] = latest_ig_date or ""
+    ig_recency = compute_social_recency_score(ig_days, channels["instagram"]["present"], last_date=latest_ig_date or "")
     channels["instagram"]["recency"] = ig_recency
 
     for cname in ("tiktok", "youtube", "whatsapp"):
