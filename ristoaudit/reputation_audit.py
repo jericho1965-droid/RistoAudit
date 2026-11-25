@@ -17,6 +17,7 @@ import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from dateutil import parser as date_parser
 from typing import Any
 
 import certifi
@@ -1463,9 +1464,17 @@ def run_reputation_and_social_audit(
     latest_fb_date: str | None = None
     latest_ig_date: str | None = None
 
-    # 1. Da recensioni/post Facebook (Bright Data restituisce date YYYY-MM-DD)
+    # 1. Da recensioni/post Facebook (Bright Data restituisce date ISO o YYYY-MM-DD)
     if fb_rev_data and fb_rev_data.get("reviews"):
-        fb_dates = [r["date"] for r in fb_rev_data["reviews"] if r.get("date")]
+        fb_dates = []
+        for r in fb_rev_data["reviews"]:
+            raw = r.get("date")
+            if raw:
+                try:
+                    dt = date_parser.isoparse(str(raw))
+                    fb_dates.append(dt.strftime("%Y-%m-%d"))
+                except Exception:
+                    fb_dates.append(str(raw)[:10])
         if fb_dates:
             latest_fb_date = max(fb_dates)
 
