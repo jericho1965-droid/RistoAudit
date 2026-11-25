@@ -15,3 +15,9 @@ services:
         sync: false
       - key: BRIGHTDATA_API_KEY
         sync: false
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: GITHUB_REPO
+        value: jericho1965-droid/RistoAudit
+      - key: GITHUB_DATA_BRANCH
+        value: data-sync

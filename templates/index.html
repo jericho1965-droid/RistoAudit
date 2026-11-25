@@ -268,11 +268,11 @@
     <form id="audit-form" action="/audit" method="POST">
       <!-- SELEZIONE RAPIDA DA DATABASE CITTA' & 50 RISTORANTI -->
       <section class="card" style="background:#fff7ed; border-color:#fdba74;">
-        <h2 style="color:#9a3412;">Selezione Rapida per Città (Database 50 Ristoranti)</h2>
-        <p class="sub" style="color:#7c2d12;">Scegli una città italiana per caricare i 50 ristoranti principali in JSON e compilare automaticamente tutti i campi sottostanti.</p>
+        <h2 style="color:#9a3412;">Selezione Rapida per Città (Database Condiviso GitHub + Top 50)</h2>
+        <p class="sub" style="color:#7c2d12;">Scegli una città per caricare i Top 50 ristoranti e tutti i locali personalizzati salvati nel database GitHub, condivisi automaticamente tra tutti i tuoi dispositivi.</p>
         <div class="grid">
           <div>
-            <label for="select_city">1. Città Italiana</label>
+            <label for="select_city">1. Città</label>
             <select id="select_city">
               <option value="">— Seleziona una città —</option>
               {% for c in cities %}
@@ -281,7 +281,7 @@
             </select>
           </div>
           <div>
-            <label for="select_restaurant">2. Ristorante (Top 50 della città)</label>
+            <label for="select_restaurant">2. Ristorante (Top 50 + salvati personalizzati)</label>
             <div style="display:flex; gap:8px;">
               <select id="select_restaurant" disabled>
                 <option value="">— Prima seleziona una città —</option>
@@ -290,7 +290,6 @@
             </div>
             <div id="city_load_status" class="hint" style="color:#9a3412; font-weight:600;"></div>
             <div id="city_export_links" class="hint" style="display:none; margin-top:6px;">
-              <button type="button" id="save_manual_fields_btn" style="display:none; margin-right:10px; padding:3px 10px; border:1px solid #c2410c; border-radius:6px; background:#fff; color:#c2410c; cursor:pointer; font-weight:700; font-size:0.78rem;">💾 Salva modifiche nel file</button>
               <a id="download_csv_link" href="#" style="margin-right:12px;">📥 Scarica Excel/CSV</a>
               <a id="download_json_link" href="#">📥 Scarica JSON</a>
             </div>
@@ -300,8 +299,12 @@
 
       <!-- BLOCCO PRINCIPALE ULTRA-RAPIDO -->
       <section class="card">
-        <h2>1. Ristorante da Analizzare</h2>
-        <p class="sub">Basta compilare questi campi: tutto il resto viene rilevato in automatico.</p>
+        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:6px;">
+          <h2 style="margin:0;">1. Ristorante da Analizzare</h2>
+          <button type="button" id="save_manual_fields_btn" style="padding:6px 13px; border:1px solid #c2410c; border-radius:7px; background:#fff7ed; color:#c2410c; cursor:pointer; font-weight:700; font-size:0.82rem;">💾 Salva ristorante / modifiche su GitHub</button>
+        </div>
+        <p class="sub">Inserisci Nome e Città (anche per locali non nei Top 50): eventuali dati già salvati vengono ripescati automaticamente da GitHub su qualsiasi dispositivo.</p>
+        <div id="save_sync_status" class="hint" style="margin-bottom:10px; font-weight:600; color:#0f766e;"></div>
         <div class="grid">
           <div>
             <label for="restaurant_name">Nome del Ristorante <span class="req">*</span></label>
@@ -423,11 +426,15 @@
       const restSelect = document.getElementById("select_restaurant");
       const refreshBtn = document.getElementById("refresh_restaurants_btn");
       const statusEl = document.getElementById("city_load_status");
+      const saveStatusEl = document.getElementById("save_sync_status");
       const exportLinksEl = document.getElementById("city_export_links");
       const saveBtn = document.getElementById("save_manual_fields_btn");
       const csvLinkEl = document.getElementById("download_csv_link");
       const jsonLinkEl = document.getElementById("download_json_link");
+      const nameInput = document.getElementById("restaurant_name");
+      const cityInput = document.getElementById("city");
       let loadedRestaurants = [];
+      let lastLookupKey = "";
 
       const fieldIds = [
         "restaurant_name", "city", "google_maps_url", "google_place_id", "address",
@@ -436,11 +443,11 @@
         "tripadvisor_url", "thefork_url", "cuisine_type", "reviews_notes"
       ];
 
-      function populateForm(r) {
+      function populateForm(r, onlyEmpty) {
         if (!r) return;
         const resolved = {
           restaurant_name: r.restaurant_name || r.name || "",
-          city: r.city || citySelect.value || "",
+          city: r.city || citySelect.value || cityInput.value || "",
           google_maps_url: r.google_maps_url || r.location_link || (r.place_id ? "https://www.google.com/maps/place/?q=place_id:" + r.place_id : ""),
           google_place_id: r.google_place_id || r.place_id || "",
           address: r.address || "",
@@ -459,10 +466,29 @@
         };
         fieldIds.forEach(function (fid) {
           const el = document.getElementById(fid);
-          if (el) {
-            el.value = resolved[fid] !== undefined && resolved[fid] !== null ? String(resolved[fid]) : "";
+          if (!el) return;
+          if (onlyEmpty && el.value && el.value.trim() !== "") return;
+          if (resolved[fid] !== undefined && resolved[fid] !== null && String(resolved[fid]).trim() !== "") {
+            el.value = String(resolved[fid]);
+          } else if (!onlyEmpty) {
+            el.value = "";
           }
         });
+      }
+
+      function renderRestaurantDropdown(selectIndex) {
+        restSelect.innerHTML = '<option value="">— Seleziona un ristorante (' + loadedRestaurants.length + ' trovati) —</option>';
+        loadedRestaurants.forEach(function (r, idx) {
+          const opt = document.createElement("option");
+          opt.value = String(idx);
+          const ratingStr = r.google_rating ? " (" + r.google_rating + "★ • " + (r.google_reviews_count || 0) + " rec.)" : "";
+          const customTag = r.custom_added ? " [Salvato]" : "";
+          opt.textContent = (idx + 1) + ". " + (r.restaurant_name || r.name) + ratingStr + customTag;
+          restSelect.appendChild(opt);
+        });
+        if (typeof selectIndex === "number" && selectIndex >= 0 && selectIndex < loadedRestaurants.length) {
+          restSelect.value = String(selectIndex);
+        }
       }
 
       async function loadCityRestaurants(city, forceRefresh) {
@@ -470,35 +496,27 @@
           restSelect.innerHTML = '<option value="">— Prima seleziona una città —</option>';
           restSelect.disabled = true;
           refreshBtn.style.display = "none";
-          saveBtn.style.display = "none";
           exportLinksEl.style.display = "none";
           statusEl.textContent = "";
           loadedRestaurants = [];
           return;
         }
         restSelect.disabled = true;
-        restSelect.innerHTML = '<option value="">Caricamento 50 ristoranti in corso...</option>';
+        restSelect.innerHTML = '<option value="">Caricamento ristoranti in corso...</option>';
         statusEl.textContent = forceRefresh
-          ? "Aggiornamento 50 ristoranti e dati social da Google Places in corso..."
-          : "Recupero lista ristoranti (cache JSON / Google Places)...";
+          ? "Aggiornamento Top 50 da Google Places e sincronizzazione su GitHub..."
+          : "Recupero lista ristoranti dal database GitHub / cache...";
         try {
           const url = "/api/restaurants?city=" + encodeURIComponent(city) + (forceRefresh ? "&refresh=1" : "");
           const resp = await fetch(url);
           const data = await resp.json();
-          if (data.error) {
+          if (data.error && (!data.restaurants || data.restaurants.length === 0)) {
             statusEl.textContent = "Errore: " + data.error;
             restSelect.innerHTML = '<option value="">— Errore caricamento —</option>';
             return;
           }
           loadedRestaurants = data.restaurants || [];
-          restSelect.innerHTML = '<option value="">— Seleziona un ristorante (' + loadedRestaurants.length + ' trovati) —</option>';
-          loadedRestaurants.forEach(function (r, idx) {
-            const opt = document.createElement("option");
-            opt.value = String(idx);
-            const ratingStr = r.google_rating ? " (" + r.google_rating + "★ • " + (r.google_reviews_count || 0) + " rec.)" : "";
-            opt.textContent = (idx + 1) + ". " + r.restaurant_name + ratingStr;
-            restSelect.appendChild(opt);
-          });
+          renderRestaurantDropdown(-1);
           restSelect.disabled = false;
           refreshBtn.style.display = "inline-block";
           if (data.csv_file && data.file) {
@@ -506,13 +524,37 @@
             jsonLinkEl.href = "/download-data/" + encodeURIComponent(data.file);
             exportLinksEl.style.display = "block";
           }
-          statusEl.textContent = (data.cached ? "✓ Caricati da locale (" : "✓ Salvati in locale (") + "data/" + data.file + " & " + data.csv_file + ") — seleziona un ristorante per compilare i campi.";
-          document.getElementById("city").value = city;
+          const srcLabel = data.github_synced ? "✓ Sincronizzati con GitHub (" : "✓ Caricati da locale (";
+          statusEl.textContent = srcLabel + loadedRestaurants.length + " ristoranti) — seleziona un locale o inseriscine uno nuovo sotto.";
+          cityInput.value = city;
         } catch (err) {
           statusEl.textContent = "Errore di rete durante il caricamento dei ristoranti.";
           restSelect.innerHTML = '<option value="">— Errore —</option>';
         }
       }
+
+      async function autoLookupRestaurant() {
+        const rName = (nameInput.value || "").trim();
+        const rCity = (cityInput.value || "").trim();
+        if (rName.length < 3 || rCity.length < 2) return;
+        const key = (rCity + "|" + rName).toLowerCase();
+        if (key === lastLookupKey) return;
+        lastLookupKey = key;
+        try {
+          const resp = await fetch(
+            "/api/restaurants/lookup?city=" + encodeURIComponent(rCity) + "&name=" + encodeURIComponent(rName)
+          );
+          const data = await resp.json();
+          if (data.found && data.restaurant) {
+            populateForm(data.restaurant, true);
+            saveStatusEl.style.color = "#0f766e";
+            saveStatusEl.textContent = "✓ Dati di «" + (data.restaurant.restaurant_name || rName) + "» ripescati automaticamente dal database condiviso!";
+          }
+        } catch (e) {}
+      }
+
+      nameInput.addEventListener("blur", autoLookupRestaurant);
+      cityInput.addEventListener("blur", autoLookupRestaurant);
 
       citySelect.addEventListener("change", function () {
         loadCityRestaurants(citySelect.value, false);
@@ -527,23 +569,26 @@
       restSelect.addEventListener("change", function () {
         const idx = parseInt(restSelect.value, 10);
         if (!isNaN(idx) && loadedRestaurants[idx]) {
-          populateForm(loadedRestaurants[idx]);
-          saveBtn.style.display = "inline-block";
-        } else {
-          saveBtn.style.display = "none";
+          populateForm(loadedRestaurants[idx], false);
+          saveStatusEl.textContent = "";
         }
       });
 
       saveBtn.addEventListener("click", async function () {
-        const idx = parseInt(restSelect.value, 10);
-        if (isNaN(idx) || !loadedRestaurants[idx]) return;
+        const rName = (nameInput.value || "").trim();
+        const rCity = (cityInput.value || "").trim();
+        if (!rName || !rCity) {
+          saveStatusEl.style.color = "#dc2626";
+          saveStatusEl.textContent = "Inserisci almeno Nome del Ristorante e Città prima di salvare.";
+          return;
+        }
         const payload = {};
         fieldIds.forEach(function (fid) {
           const el = document.getElementById(fid);
           if (el) payload[fid] = el.value;
         });
         saveBtn.disabled = true;
-        saveBtn.textContent = "Salvataggio...";
+        saveBtn.textContent = "Salvataggio su GitHub...";
         try {
           const resp = await fetch("/api/restaurants/update", {
             method: "POST",
@@ -552,16 +597,32 @@
           });
           const data = await resp.json();
           if (data.updated && data.restaurant) {
-            loadedRestaurants[idx] = data.restaurant;
-            statusEl.textContent = "✓ Modifiche salvate in data/" + data.file + " e data/" + data.csv_file + "!";
+            const idx = parseInt(restSelect.value, 10);
+            if (!isNaN(idx) && loadedRestaurants[idx] && !data.created) {
+              loadedRestaurants[idx] = data.restaurant;
+              renderRestaurantDropdown(idx);
+            } else if (citySelect.value && citySelect.value.toLowerCase() === rCity.toLowerCase()) {
+              loadedRestaurants.push(data.restaurant);
+              renderRestaurantDropdown(loadedRestaurants.length - 1);
+            }
+            const verb = data.created ? "Nuovo ristorante aggiunto" : "Modifiche salvate";
+            if (data.github_synced) {
+              saveStatusEl.style.color = "#15803d";
+              saveStatusEl.textContent = "✓ " + verb + " e sincronizzato su GitHub (branch " + (data.github_branch || "data-sync") + ") — disponibile su tutti i device!";
+            } else {
+              saveStatusEl.style.color = "#b45309";
+              saveStatusEl.textContent = "✓ " + verb + " in locale (sync GitHub non attivo: " + (data.github_reason || "imposta GITHUB_TOKEN") + ").";
+            }
           } else {
-            statusEl.textContent = "Impossibile salvare: " + (data.reason || data.error || "errore");
+            saveStatusEl.style.color = "#dc2626";
+            saveStatusEl.textContent = "Impossibile salvare: " + (data.reason || data.error || "errore");
           }
         } catch (e) {
-          statusEl.textContent = "Errore di rete durante il salvataggio.";
+          saveStatusEl.style.color = "#dc2626";
+          saveStatusEl.textContent = "Errore di rete durante il salvataggio.";
         } finally {
           saveBtn.disabled = false;
-          saveBtn.textContent = "💾 Salva modifiche nel file";
+          saveBtn.textContent = "💾 Salva ristorante / modifiche su GitHub";
         }
       });
     })();

@@ -7,14 +7,18 @@ import json
 import re
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import httpx
 from bs4 import BeautifulSoup
 
+from .github_sync import fetch_remote_db, merge_db_dicts, push_db_to_github
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
+DB_FILE = DATA_DIR / "restaurants_db.json"
 
 ITALIAN_CITIES: list[str] = [
     "Agrigento", "Alessandria", "Ancona", "Aosta", "Arezzo", "Ascoli Piceno", "Asti", "Avellino",
@@ -215,13 +219,114 @@ def _save_csv_export(csv_path: Path, restaurants: list[dict[str, Any]]) -> None:
             writer.writerow(row)
 
 
+def _norm_restaurant_name(name: str) -> str:
+    return re.sub(r"\s+", " ", (name or "").strip().lower())
+
+
+def _load_local_db() -> dict[str, Any]:
+    """Carica `data/restaurants_db.json` e importa eventuali file legacy `data/restaurants_<slug>.json`."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    db: dict[str, Any] = {"schema_version": 1, "updated_at": "", "cities": {}}
+
+    if DB_FILE.exists():
+        try:
+            raw = json.loads(DB_FILE.read_text(encoding="utf-8"))
+            if isinstance(raw, dict) and isinstance(raw.get("cities"), dict):
+                db = raw
+        except Exception:
+            pass
+
+    # Importa eventuali file legacy data/restaurants_<slug>.json non ancora presenti in restaurants_db.json
+    legacy_cities: dict[str, Any] = {}
+    for p in DATA_DIR.glob("restaurants_*.json"):
+        if p.name == DB_FILE.name:
+            continue
+        slug = p.stem[len("restaurants_"):]
+        if slug in db.get("cities", {}):
+            continue
+        try:
+            cdata = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(cdata, dict) and isinstance(cdata.get("restaurants"), list):
+                revs = cdata["restaurants"]
+                legacy_cities[slug] = {
+                    "city": str(cdata.get("city") or slug.replace("_", " ").title()),
+                    "top50_loaded": len(revs) >= 10,
+                    "count": len(revs),
+                    "restaurants": revs,
+                }
+        except Exception:
+            continue
+
+    if legacy_cities:
+        db = merge_db_dicts(db, {"cities": legacy_cities})
+        try:
+            DB_FILE.write_text(json.dumps(db, indent=2, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
+
+    return db
+
+
+def _save_local_city_and_db(db: dict[str, Any], city_slug: str | None = None) -> None:
+    """Salva `data/restaurants_db.json` e aggiorna i file locali JSON/CSV della citta'."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        DB_FILE.write_text(json.dumps(db, indent=2, ensure_ascii=False), encoding="utf-8")
+    except Exception as exc:
+        print(f"[RistoAudit] Errore salvataggio locale {DB_FILE}: {exc}")
+
+    slugs = [city_slug] if city_slug else list((db.get("cities") or {}).keys())
+    for sl in slugs:
+        c_obj = (db.get("cities") or {}).get(sl)
+        if not isinstance(c_obj, dict):
+            continue
+        rows = c_obj.get("restaurants") or []
+        city_name = str(c_obj.get("city") or sl)
+        cache_file = DATA_DIR / f"restaurants_{sl}.json"
+        csv_file = DATA_DIR / f"restaurants_{sl}.csv"
+        try:
+            cache_file.write_text(
+                json.dumps({"city": city_name, "count": len(rows), "restaurants": rows}, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            _save_csv_export(csv_file, rows)
+        except Exception as exc:
+            print(f"[RistoAudit] Errore export locale {cache_file}: {exc}")
+
+
+def _load_synced_db(force_remote: bool = False) -> tuple[dict[str, Any], bool]:
+    """Carica il DB unificato fondendo sempre l'ultima versione remota su GitHub con la cache locale."""
+    local_db = _load_local_db()
+    remote_db, _ = fetch_remote_db(force=force_remote)
+    if remote_db is not None:
+        merged = merge_db_dicts(remote_db, local_db)
+        try:
+            DB_FILE.write_text(json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
+        return merged, True
+    return local_db, False
+
+
+def get_all_known_cities() -> list[str]:
+    """Restituisce i capoluoghi italiani piu' eventuali altre citta' salvate nel database GitHub."""
+    known = {c.lower(): c for c in ITALIAN_CITIES}
+    db, _ = _load_synced_db(force_remote=False)
+    for c_obj in (db.get("cities") or {}).values():
+        if isinstance(c_obj, dict):
+            cname = str(c_obj.get("city") or "").strip()
+            if cname and cname.lower() not in known:
+                known[cname.lower()] = cname
+    return sorted(known.values(), key=lambda s: s.lower())
+
+
 def get_city_restaurants(
     city: str,
     google_places_api_key: str,
     force_refresh: bool = False,
     limit: int = 50,
 ) -> dict[str, Any]:
-    """Restituisce i primi 50 ristoranti di una citta', salvando sia JSON sia CSV (Excel) in locale."""
+    """Restituisce tutti i ristoranti di una citta' (Top 50 + aggiunti manualmente), sincronizzati con GitHub."""
     city_clean = city.strip()
     if not city_clean:
         return {"city": "", "restaurants": [], "error": "Città non specificata."}
@@ -231,31 +336,34 @@ def get_city_restaurants(
     cache_file = DATA_DIR / f"restaurants_{slug}.json"
     csv_file = DATA_DIR / f"restaurants_{slug}.csv"
 
-    if cache_file.exists() and not force_refresh:
-        try:
-            cached_data = json.loads(cache_file.read_text(encoding="utf-8"))
-            if isinstance(cached_data, dict) and isinstance(cached_data.get("restaurants"), list):
-                revs = cached_data["restaurants"]
-                # Se il CSV non esiste ancora o mancavano i campi Outscraper, rigenera il CSV se possibile
-                if revs and not csv_file.exists():
-                    _save_csv_export(csv_file, revs)
-                return {
-                    "city": cached_data.get("city", city_clean),
-                    "cached": True,
-                    "count": len(revs),
-                    "file": cache_file.name,
-                    "csv_file": csv_file.name,
-                    "restaurants": revs,
-                }
-        except Exception:
-            pass
+    db, from_github = _load_synced_db(force_remote=True)
+    existing_city_obj = (db.get("cities") or {}).get(slug)
+    existing_rows: list[dict[str, Any]] = (
+        list(existing_city_obj.get("restaurants") or [])
+        if isinstance(existing_city_obj, dict) else []
+    )
+    has_top50 = bool(isinstance(existing_city_obj, dict) and (existing_city_obj.get("top50_loaded") or len(existing_rows) >= 15))
+
+    if existing_rows and not force_refresh and (has_top50 or not (google_places_api_key or "").strip()):
+        _save_local_city_and_db(db, slug)
+        return {
+            "city": existing_city_obj.get("city", city_clean) if isinstance(existing_city_obj, dict) else city_clean,
+            "cached": True,
+            "github_synced": from_github,
+            "count": len(existing_rows),
+            "file": cache_file.name,
+            "csv_file": csv_file.name,
+            "restaurants": existing_rows,
+        }
 
     key = (google_places_api_key or "").strip()
     if not key:
         return {
             "city": city_clean,
-            "restaurants": [],
-            "error": "Google Places API Key non configurata in .ristoaudit_settings.json.",
+            "restaurants": existing_rows,
+            "count": len(existing_rows),
+            "github_synced": from_github,
+            "error": "Google Places API Key non configurata." if not existing_rows else "",
         }
 
     url = "https://places.googleapis.com/v1/places:searchText"
@@ -394,54 +502,163 @@ def get_city_restaurants(
         print(f"[RistoAudit] Errore recupero ristoranti per {city_clean}: {exc}")
         return {"city": city_clean, "restaurants": [], "error": str(exc)}
 
+    github_sync_ok = from_github
     if restaurants:
         with ThreadPoolExecutor(max_workers=20) as pool:
             restaurants = list(pool.map(_enrich_from_website, restaurants))
 
-        # Preserva eventuali campi compilati manualmente nel file JSON precedente
-        if cache_file.exists():
-            try:
-                old_data = json.loads(cache_file.read_text(encoding="utf-8"))
-                old_by_pid = {
-                    str(r.get("google_place_id") or r.get("place_id") or ""): r
-                    for r in (old_data.get("restaurants") or [])
-                    if isinstance(r, dict)
-                }
-                manual_keys = (
-                    "instagram_url", "company_instagram", "facebook_url", "company_facebook",
-                    "tiktok_url", "social_handle", "website_url", "website", "menu_url",
-                    "menu_link", "tripadvisor_url", "thefork_url", "cuisine_type", "category",
-                    "type", "reviews_notes", "google_maps_url", "location_link", "email",
-                )
-                for r in restaurants:
-                    pid_k = str(r.get("google_place_id") or r.get("place_id") or "")
-                    old_r = old_by_pid.get(pid_k)
-                    if old_r:
-                        for mk in manual_keys:
-                            if not r.get(mk) and old_r.get(mk):
-                                r[mk] = old_r[mk]
-            except Exception:
-                pass
+        # Preserva TUTTI i campi manuali e TUTTI i ristoranti extra (fuori Top 50) gia' presenti su GitHub/locale
+        old_by_pid: dict[str, dict[str, Any]] = {}
+        old_by_name: dict[str, dict[str, Any]] = {}
+        for old_r in existing_rows:
+            if not isinstance(old_r, dict):
+                continue
+            opid = str(old_r.get("google_place_id") or old_r.get("place_id") or "").strip()
+            oname = _norm_restaurant_name(str(old_r.get("restaurant_name") or old_r.get("name") or ""))
+            if opid:
+                old_by_pid[opid] = old_r
+            if oname:
+                old_by_name[oname] = old_r
 
-        payload = {
+        manual_keys = (
+            "instagram_url", "company_instagram", "facebook_url", "company_facebook",
+            "tiktok_url", "social_handle", "website_url", "website", "menu_url",
+            "menu_link", "tripadvisor_url", "thefork_url", "cuisine_type", "category",
+            "type", "reviews_notes", "google_maps_url", "location_link", "email", "address",
+        )
+        matched_old_keys: set[str] = set()
+        for r in restaurants:
+            pid_k = str(r.get("google_place_id") or r.get("place_id") or "").strip()
+            name_k = _norm_restaurant_name(str(r.get("restaurant_name") or r.get("name") or ""))
+            old_r = (old_by_pid.get(pid_k) if pid_k else None) or (old_by_name.get(name_k) if name_k else None)
+            if old_r:
+                if pid_k:
+                    matched_old_keys.add(f"pid:{pid_k}")
+                if name_k:
+                    matched_old_keys.add(f"name:{name_k}")
+                for mk in manual_keys:
+                    if old_r.get(mk) and (not r.get(mk) or old_r.get("updated_at")):
+                        r[mk] = old_r[mk]
+                if old_r.get("updated_at"):
+                    r["updated_at"] = old_r["updated_at"]
+
+        # Appendi eventuali ristoranti aggiunti manualmente fuori dai Top 50
+        for old_r in existing_rows:
+            if not isinstance(old_r, dict):
+                continue
+            opid = str(old_r.get("google_place_id") or old_r.get("place_id") or "").strip()
+            oname = _norm_restaurant_name(str(old_r.get("restaurant_name") or old_r.get("name") or ""))
+            if (opid and f"pid:{opid}" in matched_old_keys) or (oname and f"name:{oname}" in matched_old_keys):
+                continue
+            restaurants.append(old_r)
+
+        db.setdefault("cities", {})[slug] = {
             "city": city_clean,
+            "top50_loaded": True,
             "count": len(restaurants),
             "restaurants": restaurants,
         }
-        try:
-            cache_file.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-            _save_csv_export(csv_file, restaurants)
-        except Exception as exc:
-            print(f"[RistoAudit] Errore salvataggio locale {cache_file}/{csv_file}: {exc}")
+        db["updated_at"] = datetime.now(timezone.utc).isoformat()
+        _save_local_city_and_db(db, slug)
+        sync_res = push_db_to_github(db, commit_message=f"Sync {city_clean} restaurants ({len(restaurants)})")
+        github_sync_ok = bool(sync_res.get("synced"))
+        if sync_res.get("merged_db"):
+            db = sync_res["merged_db"]
+            restaurants = (db.get("cities", {}).get(slug) or {}).get("restaurants") or restaurants
+            _save_local_city_and_db(db, slug)
+    elif existing_rows:
+        restaurants = existing_rows
 
     return {
         "city": city_clean,
         "cached": False,
+        "github_synced": github_sync_ok,
         "count": len(restaurants),
         "file": cache_file.name,
         "csv_file": csv_file.name,
         "restaurants": restaurants,
     }
+
+
+def _build_new_restaurant_row(city: str, updates: dict[str, Any]) -> dict[str, Any]:
+    """Costruisce un nuovo record ristorante completo (anche se non presente nei Top 50)."""
+    name = str(updates.get("restaurant_name") or updates.get("name") or "").strip()
+    pid = str(updates.get("google_place_id") or updates.get("place_id") or "").strip()
+    maps_url = str(updates.get("google_maps_url") or updates.get("location_link") or "").strip()
+    if not maps_url and pid:
+        maps_url = f"https://www.google.com/maps/place/?q=place_id:{pid}"
+    site_url = str(updates.get("website_url") or updates.get("website") or "").strip()
+    domain = urllib.parse.urlsplit(site_url).netloc.removeprefix("www.") if site_url else ""
+    cat = str(updates.get("cuisine_type") or updates.get("category") or updates.get("type") or "").strip()
+    ig = str(updates.get("instagram_url") or updates.get("company_instagram") or "").strip()
+    fb = str(updates.get("facebook_url") or updates.get("company_facebook") or "").strip()
+    tk = str(updates.get("tiktok_url") or "").strip()
+    handle = str(updates.get("social_handle") or "").strip() or (
+        _extract_handle_from_url(ig) or _extract_handle_from_url(fb) or _extract_handle_from_url(tk)
+    )
+    menu_u = str(updates.get("menu_url") or updates.get("menu_link") or "").strip()
+
+    row: dict[str, Any] = {
+        "query": f"manuale {city}",
+        "name": name,
+        "name_for_emails": name,
+        "subtypes": "",
+        "category": cat,
+        "type": cat,
+        "phone": str(updates.get("phone") or "").strip(),
+        "website": site_url,
+        "address": str(updates.get("address") or "").strip(),
+        "street": "",
+        "city": city,
+        "state": "",
+        "postal_code": "",
+        "country": "Italia",
+        "country_code": "IT",
+        "domain": domain,
+        "company_facebook": fb,
+        "company_instagram": ig,
+        "company_x": "",
+        "company_youtube": "",
+        "tiktok_url": tk,
+        "email": str(updates.get("email") or "").strip(),
+        "website_title": "",
+        "website_description": "",
+        "website_generator": "",
+        "website_has_gtm": 0,
+        "website_has_fb_pixel": 0,
+        "latitude": None,
+        "longitude": None,
+        "rating": updates.get("google_rating") or updates.get("rating"),
+        "reviews": updates.get("google_reviews_count") or updates.get("reviews"),
+        "reviews_link": f"https://search.google.com/local/reviews?placeid={pid}&hl=it&gl=IT" if pid else "",
+        "business_status": "OPERATIONAL",
+        "working_hours": "",
+        "range": "",
+        "reservation_links": "",
+        "menu_link": menu_u,
+        "tripadvisor_url": str(updates.get("tripadvisor_url") or "").strip(),
+        "thefork_url": str(updates.get("thefork_url") or "").strip(),
+        "about": {},
+        "description": "",
+        "location_link": maps_url,
+        "place_id": pid,
+        "cid": _extract_cid_from_url(maps_url),
+        "restaurant_name": name,
+        "cuisine_type": cat,
+        "google_maps_url": maps_url,
+        "google_place_id": pid,
+        "website_url": site_url,
+        "menu_url": menu_u,
+        "instagram_url": ig,
+        "facebook_url": fb,
+        "social_handle": handle,
+        "google_rating": updates.get("google_rating") or updates.get("rating"),
+        "google_reviews_count": updates.get("google_reviews_count") or updates.get("reviews"),
+        "reviews_notes": str(updates.get("reviews_notes") or "").strip(),
+        "custom_added": True,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    return row
 
 
 def _apply_updates_to_row(row: dict[str, Any], updates: dict[str, Any], overwrite_empty: bool = False) -> None:
@@ -450,6 +667,7 @@ def _apply_updates_to_row(row: dict[str, Any], updates: dict[str, Any], overwrit
         ("restaurant_name", ("name", "name_for_emails")),
         ("cuisine_type", ("category", "type")),
         ("google_maps_url", ("location_link",)),
+        ("google_place_id", ("place_id",)),
         ("website_url", ("website",)),
         ("menu_url", ("menu_link",)),
         ("instagram_url", ("company_instagram",)),
@@ -460,6 +678,8 @@ def _apply_updates_to_row(row: dict[str, Any], updates: dict[str, Any], overwrit
         ("thefork_url", ()),
         ("reviews_notes", ()),
         ("address", ()),
+        ("email", ()),
+        ("phone", ()),
     ]
     for primary_key, mirror_keys in field_pairs:
         if primary_key not in updates:
@@ -473,64 +693,134 @@ def _apply_updates_to_row(row: dict[str, Any], updates: dict[str, Any], overwrit
             row[mk] = val
         if primary_key == "website_url":
             row["domain"] = urllib.parse.urlsplit(val).netloc.removeprefix("www.") if val else ""
+        elif primary_key == "google_maps_url" and val:
+            cid = _extract_cid_from_url(val)
+            if cid:
+                row["cid"] = cid
+
+    for num_primary, num_mirror in (("google_rating", "rating"), ("google_reviews_count", "reviews")):
+        if num_primary in updates and updates[num_primary] not in (None, ""):
+            row[num_primary] = updates[num_primary]
+            row[num_mirror] = updates[num_primary]
+
+    if not row.get("social_handle"):
+        row["social_handle"] = (
+            _extract_handle_from_url(str(row.get("instagram_url") or ""))
+            or _extract_handle_from_url(str(row.get("facebook_url") or ""))
+            or _extract_handle_from_url(str(row.get("tiktok_url") or ""))
+        )
+    row["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+
+def lookup_saved_restaurant(
+    city: str = "",
+    restaurant_name: str = "",
+    google_place_id: str = "",
+    force_remote: bool = False,
+) -> dict[str, Any] | None:
+    """Ripesca automaticamente un ristorante salvato dal database JSON sincronizzato su GitHub."""
+    target_pid = (google_place_id or "").strip()
+    target_name = _norm_restaurant_name(restaurant_name)
+    if not target_pid and not target_name:
+        return None
+
+    db, _ = _load_synced_db(force_remote=force_remote)
+    cities = db.get("cities") or {}
+
+    search_slugs: list[str] = []
+    if (city or "").strip():
+        primary_slug = _city_slug(city)
+        if primary_slug in cities:
+            search_slugs.append(primary_slug)
+    for sl in cities:
+        if sl not in search_slugs:
+            search_slugs.append(sl)
+
+    for sl in search_slugs:
+        rows = (cities.get(sl) or {}).get("restaurants") or []
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            r_pid = str(r.get("google_place_id") or r.get("place_id") or "").strip()
+            r_name = _norm_restaurant_name(str(r.get("restaurant_name") or r.get("name") or ""))
+            if target_pid and r_pid and r_pid == target_pid:
+                return dict(r)
+            if target_name and r_name and r_name == target_name:
+                if not (city or "").strip() or sl == _city_slug(city):
+                    return dict(r)
+    return None
 
 
 def update_restaurant_in_city_cache(
     city: str,
     updates: dict[str, Any],
     overwrite_empty: bool = False,
+    sync_github: bool = True,
+    commit_note: str = "",
 ) -> dict[str, Any]:
-    """Salva i campi compilati manualmente dall'operatore nel file JSON e CSV della citta'."""
+    """Salva o aggiunge (upsert) un ristorante nel JSON centralizzato locale e su GitHub (anche fuori Top 50)."""
     city_clean = (city or "").strip()
+    target_name_raw = str(updates.get("restaurant_name") or updates.get("name") or "").strip()
+    target_pid = str(updates.get("google_place_id") or updates.get("place_id") or "").strip()
+
     if not city_clean:
         return {"updated": False, "reason": "missing_city"}
+    if not target_name_raw and not target_pid:
+        return {"updated": False, "reason": "missing_restaurant_name"}
 
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
     slug = _city_slug(city_clean)
-    cache_file = DATA_DIR / f"restaurants_{slug}.json"
-    csv_file = DATA_DIR / f"restaurants_{slug}.csv"
+    db, _ = _load_synced_db(force_remote=sync_github)
+    cities = db.setdefault("cities", {})
+    city_obj = cities.get(slug)
+    if not isinstance(city_obj, dict):
+        city_obj = {"city": city_clean, "top50_loaded": False, "count": 0, "restaurants": []}
+        cities[slug] = city_obj
 
-    if not cache_file.exists():
-        return {"updated": False, "reason": "city_file_not_found"}
-
-    try:
-        cached_data = json.loads(cache_file.read_text(encoding="utf-8"))
-        restaurants = cached_data.get("restaurants")
-        if not isinstance(restaurants, list):
-            return {"updated": False, "reason": "invalid_cache"}
-    except Exception as exc:
-        return {"updated": False, "reason": str(exc)}
-
-    target_pid = str(updates.get("google_place_id") or updates.get("place_id") or "").strip()
-    target_name = str(updates.get("restaurant_name") or updates.get("name") or "").strip().lower()
+    restaurants = city_obj.setdefault("restaurants", [])
+    target_name = _norm_restaurant_name(target_name_raw)
 
     matched_row: dict[str, Any] | None = None
     for r in restaurants:
+        if not isinstance(r, dict):
+            continue
         r_pid = str(r.get("google_place_id") or r.get("place_id") or "").strip()
-        r_name = str(r.get("restaurant_name") or r.get("name") or "").strip().lower()
-        if target_pid and r_pid == target_pid:
+        r_name = _norm_restaurant_name(str(r.get("restaurant_name") or r.get("name") or ""))
+        if target_pid and r_pid and r_pid == target_pid:
             matched_row = r
             break
-        if target_name and r_name == target_name:
+        if target_name and r_name and r_name == target_name:
             matched_row = r
             break
 
+    created_new = False
     if matched_row is None:
-        return {"updated": False, "reason": "restaurant_not_found"}
+        matched_row = _build_new_restaurant_row(city_clean, updates)
+        restaurants.append(matched_row)
+        created_new = True
+    else:
+        _apply_updates_to_row(matched_row, updates, overwrite_empty=overwrite_empty)
 
-    _apply_updates_to_row(matched_row, updates, overwrite_empty=overwrite_empty)
+    city_obj["count"] = len(restaurants)
+    db["updated_at"] = datetime.now(timezone.utc).isoformat()
+    _save_local_city_and_db(db, slug)
 
-    payload = {
-        "city": cached_data.get("city", city_clean),
-        "count": len(restaurants),
-        "restaurants": restaurants,
-    }
-    cache_file.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-    _save_csv_export(csv_file, restaurants)
+    github_res: dict[str, Any] = {"synced": False, "reason": "sync_disabled"}
+    if sync_github:
+        action = "Add" if created_new else "Update"
+        note = commit_note or f"{action} restaurant: {matched_row.get('restaurant_name') or target_name_raw} ({city_clean})"
+        github_res = push_db_to_github(db, commit_message=note)
+        if github_res.get("merged_db"):
+            db = github_res["merged_db"]
+            _save_local_city_and_db(db, slug)
 
     return {
         "updated": True,
-        "file": cache_file.name,
-        "csv_file": csv_file.name,
+        "created": created_new,
+        "file": f"restaurants_{slug}.json",
+        "csv_file": f"restaurants_{slug}.csv",
+        "db_file": DB_FILE.name,
+        "github_synced": bool(github_res.get("synced")),
+        "github_reason": "" if github_res.get("synced") else str(github_res.get("reason") or ""),
+        "github_branch": str(github_res.get("branch") or ""),
         "restaurant": matched_row,
     }

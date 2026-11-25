@@ -23,7 +23,9 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 from ristoaudit.city_restaurants import (
     DATA_DIR,
     ITALIAN_CITIES,
+    get_all_known_cities,
     get_city_restaurants,
+    lookup_saved_restaurant,
     update_restaurant_in_city_cache,
 )
 from ristoaudit.email_draft import save_email_draft
@@ -53,6 +55,44 @@ def _run_audit_job(job_id: str, audit_input: AuditInput) -> None:
         email_path = save_email_draft(result, REPORTS_DIR, pdf_path.stem)
         json_path = pdf_path.with_suffix(".json")
         json_path.write_text(json.dumps(asdict(result), indent=2, ensure_ascii=False), encoding="utf-8")
+
+        # Arricchisce automaticamente il database JSON su GitHub con tutti i dati scoperti dall'audit
+        try:
+            soc_ch = (result.social_data or {}).get("channels") or {}
+            rev = result.reviews_data or {}
+            gprof = rev.get("google_profile") or {}
+            web = result.website_data or {}
+            menu = result.menu_data or {}
+            discovered_updates = {
+                "restaurant_name": audit_input.restaurant_name,
+                "google_place_id": rev.get("google_place_id") or audit_input.google_place_id,
+                "google_maps_url": rev.get("google_maps_url") or audit_input.google_maps_url,
+                "address": gprof.get("formatted_address") or audit_input.address,
+                "phone": gprof.get("phone") or "",
+                "email": web.get("contact_email") or "",
+                "cuisine_type": audit_input.cuisine_type,
+                "website_url": web.get("final_url") or gprof.get("website_uri") or audit_input.website_url,
+                "menu_url": menu.get("menu_url") or audit_input.menu_url,
+                "instagram_url": (soc_ch.get("instagram") or {}).get("url") or audit_input.instagram_url,
+                "facebook_url": (soc_ch.get("facebook") or {}).get("url") or audit_input.facebook_url,
+                "tiktok_url": (soc_ch.get("tiktok") or {}).get("url") or audit_input.tiktok_url,
+                "social_handle": audit_input.social_handle,
+                "tripadvisor_url": rev.get("tripadvisor_url") or audit_input.tripadvisor_url,
+                "thefork_url": rev.get("thefork_url") or audit_input.thefork_url,
+                "google_rating": rev.get("google_rating"),
+                "google_reviews_count": rev.get("google_reviews_count"),
+                "reviews_notes": audit_input.reviews_notes,
+            }
+            update_restaurant_in_city_cache(
+                city=audit_input.city,
+                updates=discovered_updates,
+                overwrite_empty=False,
+                sync_github=True,
+                commit_note=f"Audit enrich: {audit_input.restaurant_name} ({audit_input.city})",
+            )
+        except Exception as sync_exc:
+            print(f"[RistoAudit] Avviso sync post-audit: {sync_exc}")
+
         with JOBS_LOCK:
             JOBS[job_id].update({
                 "status": "done",
@@ -190,10 +230,24 @@ class RistoAuditHandler(BaseHTTPRequestHandler):
                 tpl.render(
                     recent_pdfs=[p.name for p in recent_pdfs],
                     saved=_load_saved_settings(),
-                    cities=ITALIAN_CITIES,
+                    cities=get_all_known_cities(),
                     error="",
                 )
             )
+            return
+
+        if path == "/api/restaurants/lookup":
+            qs = urllib.parse.parse_qs(parsed.query)
+            city_q = (qs.get("city") or [""])[0].strip()
+            name_q = (qs.get("name") or [""])[0].strip()
+            pid_q = (qs.get("place_id") or [""])[0].strip()
+            found = lookup_saved_restaurant(
+                city=city_q,
+                restaurant_name=name_q,
+                google_place_id=pid_q,
+                force_remote=False,
+            )
+            self._send_json({"found": bool(found), "restaurant": found})
             return
 
         if path == "/api/restaurants":
@@ -348,6 +402,7 @@ class RistoAuditHandler(BaseHTTPRequestHandler):
                 city=str(body.get("city") or ""),
                 updates=body,
                 overwrite_empty=True,
+                sync_github=True,
             )
             self._send_json(res)
             return
@@ -393,31 +448,52 @@ class RistoAuditHandler(BaseHTTPRequestHandler):
             explicit_pid = maps_or_pid
             maps_or_pid = ""
 
+        # Ripesca in automatico da GitHub eventuali dati gia' salvati per questo ristorante (da qualsiasi device)
+        saved_rest = lookup_saved_restaurant(
+            city=city,
+            restaurant_name=restaurant_name,
+            google_place_id=explicit_pid,
+            force_remote=True,
+        ) or {}
+
+        def _pick(form_key: str, *saved_keys: str) -> str:
+            val = _form_val(params, form_key)
+            if val:
+                return val
+            for sk in saved_keys:
+                sv = saved_rest.get(sk)
+                if sv is not None and str(sv).strip():
+                    return str(sv).strip()
+            return ""
+
+        resolved_pid = explicit_pid or str(saved_rest.get("google_place_id") or saved_rest.get("place_id") or "").strip()
+        resolved_maps = maps_or_pid or str(saved_rest.get("google_maps_url") or saved_rest.get("location_link") or "").strip()
+
         audit_input = AuditInput(
             restaurant_name=restaurant_name,
             city=city,
-            address=_form_val(params, "address"),
-            cuisine_type=_form_val(params, "cuisine_type"),
+            address=_pick("address", "address"),
+            cuisine_type=_pick("cuisine_type", "cuisine_type", "category", "type"),
             consultant_name=consultant_name,
             consultant_contact=consultant_contact,
-            website_url=_form_val(params, "website_url"),
-            menu_url=_form_val(params, "menu_url"),
+            website_url=_pick("website_url", "website_url", "website"),
+            menu_url=_pick("menu_url", "menu_url", "menu_link"),
             known_menu_year=_form_val(params, "known_menu_year"),
-            social_handle=_form_val(params, "social_handle"),
-            instagram_url=_form_val(params, "instagram_url"),
-            facebook_url=_form_val(params, "facebook_url"),
-            tiktok_url=_form_val(params, "tiktok_url"),
+            social_handle=_pick("social_handle", "social_handle"),
+            instagram_url=_pick("instagram_url", "instagram_url", "company_instagram"),
+            facebook_url=_pick("facebook_url", "facebook_url", "company_facebook"),
+            tiktok_url=_pick("tiktok_url", "tiktok_url"),
             last_social_post_date=_form_val(params, "last_social_post_date"),
-            google_maps_url=maps_or_pid,
-            google_place_id=explicit_pid,
-            tripadvisor_url=_form_val(params, "tripadvisor_url"),
-            thefork_url=_form_val(params, "thefork_url"),
-            google_rating=_form_val(params, "google_rating"),
-            google_reviews_count=_form_val(params, "google_reviews_count"),
+            google_maps_url=resolved_maps,
+            google_place_id=resolved_pid,
+            tripadvisor_url=_pick("tripadvisor_url", "tripadvisor_url"),
+            thefork_url=_pick("thefork_url", "thefork_url"),
+            google_rating=_pick("google_rating", "google_rating", "rating"),
+            google_reviews_count=_pick("google_reviews_count", "google_reviews_count", "reviews"),
             tripadvisor_rating=_form_val(params, "tripadvisor_rating"),
             unanswered_reviews_count=_form_val(params, "unanswered_reviews_count"),
             unanswered_negative_reviews=_form_val(params, "unanswered_negative_reviews"),
-            reviews_notes=_form_val(params, "reviews_notes"),
+            reviews_notes=_pick("reviews_notes", "reviews_notes"),
             google_places_api_key=api_key,
             tripadvisor_terra_api_key=ta_api_key,
             brightdata_api_key=bd_api_key,
@@ -427,13 +503,13 @@ class RistoAuditHandler(BaseHTTPRequestHandler):
             deep_link_check=_form_bool(params, "deep_link_check", default=True),
         )
 
-        # Salva automaticamente eventuali campi compilati manualmente nel JSON/CSV della citta'
+        # Salva/aggiunge automaticamente il ristorante (anche fuori Top 50) nel JSON locale e su GitHub
         update_restaurant_in_city_cache(
             city=city,
             updates={
                 "restaurant_name": restaurant_name,
-                "google_place_id": explicit_pid,
-                "google_maps_url": maps_or_pid,
+                "google_place_id": resolved_pid,
+                "google_maps_url": resolved_maps,
                 "address": audit_input.address,
                 "cuisine_type": audit_input.cuisine_type,
                 "website_url": audit_input.website_url,
@@ -447,6 +523,7 @@ class RistoAuditHandler(BaseHTTPRequestHandler):
                 "reviews_notes": audit_input.reviews_notes,
             },
             overwrite_empty=False,
+            sync_github=True,
         )
 
         job_id = uuid.uuid4().hex[:12]
